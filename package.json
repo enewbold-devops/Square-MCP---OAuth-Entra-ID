@@ -1,0 +1,27 @@
+{
+  "name": "azapp-nodejs-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Square operations MCP server for franchise restaurants - self-hosted Node.js/Express implementation for Azure App Service.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@azure/identity": "^4.13.1",
+    "@azure/keyvault-secrets": "^4.11.2",
+    "@modelcontextprotocol/express": "^2.0.0",
+    "@modelcontextprotocol/node": "^2.0.0",
+    "@modelcontextprotocol/server": "^2.0.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "jose": "^5.9.6",
+    "square": "^45.0.1",
+    "zod": "^4.0.0"
+  }
+}
