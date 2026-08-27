@@ -39,7 +39,7 @@ export class AppConfig {
     // WEBSITE_HOSTNAME is auto-injected by Azure App Service (absent locally) - keeps the MCP
     // transport's Host-header allowlist in sync with wherever this app is actually reachable.
     #resolveAllowedHosts(env) {
-        const hosts = new Set(['localhost', '127.0.0.1', '[::1]']);
+        const hosts = new Set(['localhost', '127.0.0.1', '[::1]', 'enewbold-square-mcp-d8bvfkazg9h7hjdn.eastus-01.azurewebsites.net']);
         if (env.WEBSITE_HOSTNAME) {
             hosts.add(env.WEBSITE_HOSTNAME);
         }
