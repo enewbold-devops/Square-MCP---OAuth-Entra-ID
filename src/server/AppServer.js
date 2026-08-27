@@ -1,14 +1,12 @@
-import { createMcpExpressApp, mcpAuthMetadataRouter } from '@modelcontextprotocol/express';
+import { createMcpExpressApp } from '@modelcontextprotocol/express';
 
 import { AppConfig } from '../config/AppConfig.js';
 import { KeyVaultService } from '../services/KeyVaultService.js';
 import { SquareOAuthService } from '../services/SquareOAuthService.js';
-import { EntraOAuthService } from '../services/EntraOAuthService.js';
-import { BrokerTokenSigner } from '../services/BrokerTokenSigner.js';
-import { McpTokenVerifier } from '../services/McpTokenVerifier.js';
 import { OAuthStateSigner } from '../services/OAuthStateSigner.js';
 import { PreviewTokenSigner } from '../services/PreviewTokenSigner.js';
 import { SquareContextResolver } from '../services/SquareContextResolver.js';
+import { easyAuthPrincipal } from '../web/middleware/EasyAuthPrincipal.js';
 
 import { WhoAmITool } from '../tools/WhoAmITool.js';
 import { SquareConnectAccountTool } from '../tools/SquareConnectAccountTool.js';
@@ -24,13 +22,9 @@ import { PublishScheduleTool } from '../tools/PublishScheduleTool.js';
 
 import { McpEndpointController } from '../web/routes/McpEndpointController.js';
 import { SquareOAuthController } from '../web/routes/SquareOAuthController.js';
-import { OAuthBrokerController } from '../web/routes/OAuthBrokerController.js';
 
 const SERVER_NAME = 'SquareMCP-FranchiseRestaurantOps';
-const SERVER_VERSION = '2.0.0';
-// One-time proof of domain ownership for ChatGPT's connector registration - the token itself
-// carries no privileges, so hardcoding it here (rather than Key Vault) is fine.
-const OPENAI_APPS_CHALLENGE_TOKEN = 'q-r49akVYddSSv594SmSj8mMj_v37EZNOr4VnON20KU';
+const SERVER_VERSION = '3.0.0';
 const SERVER_INSTRUCTIONS =
     'Square operations MCP server for franchise restaurants: payroll, tip reconciliation, timecards, scheduling, and workforce tools, scoped per connected franchise owner.';
 
@@ -47,17 +41,16 @@ export class AppServer {
     #buildApp() {
         const keyVaultService = new KeyVaultService(this.#config.keyVaultUri);
         const squareOAuthService = new SquareOAuthService(keyVaultService);
-        const entraOAuthService = new EntraOAuthService(keyVaultService);
-        const brokerTokenSigner = new BrokerTokenSigner(keyVaultService);
         const oauthStateSigner = new OAuthStateSigner(keyVaultService);
         const previewTokenSigner = new PreviewTokenSigner(keyVaultService);
         const squareContextResolver = new SquareContextResolver(keyVaultService, squareOAuthService);
 
-        const oauthBrokerController = new OAuthBrokerController({ config: this.#config, entraOAuthService, brokerTokenSigner });
-        const tokenVerifier = new McpTokenVerifier(brokerTokenSigner, {
-            issuer: oauthBrokerController.issuer,
-            audience: oauthBrokerController.mcpResourceUrl,
-        });
+        // Enterprise identity is proven by Azure App Service Authentication (Easy Auth), configured
+        // on the App Service resource itself (Microsoft Entra ID provider, "Require authentication") -
+        // no in-code OAuth broker/PKCE handling/JWT verification is needed here. This also drops the
+        // PKCE requirement ChatGPT's MCP client enforced, unblocking Microsoft Copilot Studio Agents,
+        // which authenticate through the platform and don't need PKCE discovery metadata.
+        const authMiddleware = easyAuthPrincipal({ devPrincipal: this.#config.easyAuthDevPrincipal });
 
         const tools = [
             new WhoAmITool(squareContextResolver),
@@ -81,39 +74,13 @@ export class AppServer {
             allowedOrigins: this.#config.allowedHosts,
         });
 
-        app.get('/.well-known/openai-apps-challenge', (_req, res) => {
-            res.type('text/plain').send(OPENAI_APPS_CHALLENGE_TOKEN);
-        });
-
-        // RFC 8414/9728 discovery documents ChatGPT's MCP client validates before it will register this
-        // server - code_challenge_methods_supported must include S256, which Entra's own discovery
-        // document does not reliably advertise, hence fronting Entra with this broker.
-        app.use(
-            mcpAuthMetadataRouter({
-                resourceServerUrl: new URL(oauthBrokerController.mcpResourceUrl),
-                oauthMetadata: {
-                    issuer: oauthBrokerController.issuer,
-                    authorization_endpoint: `${oauthBrokerController.issuer}/oauth/authorize`,
-                    token_endpoint: `${oauthBrokerController.issuer}/oauth/token`,
-                    jwks_uri: `${oauthBrokerController.issuer}/.well-known/jwks.json`,
-                    response_types_supported: ['code'],
-                    grant_types_supported: ['authorization_code'],
-                    code_challenge_methods_supported: ['S256'],
-                    token_endpoint_auth_methods_supported: ['none'],
-                    scopes_supported: ['mcp.read', 'mcp.write'],
-                },
-            })
-        );
-
-        oauthBrokerController.registerRoutes(app);
         new SquareOAuthController({ config: this.#config, oauthStateSigner, squareOAuthService, keyVaultService }).registerRoutes(app);
         new McpEndpointController({
             serverName: SERVER_NAME,
             serverVersion: SERVER_VERSION,
             serverInstructions: SERVER_INSTRUCTIONS,
             tools,
-            tokenVerifier,
-            resourceServerUrl: new URL(oauthBrokerController.mcpResourceUrl),
+            authMiddleware,
         }).registerRoutes(app);
 
         return app;
