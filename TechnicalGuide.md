@@ -2,16 +2,16 @@
 
 ## Alan Newbold (AI Engine) | developer@e-newbold.com
 
-A self-hosted Node.js/Express [MCP](https://modelcontextprotocol.io) server, designed to run on Azure App Service, that exposes Square Labor operations (scheduling, timecards, payroll/tip reconciliation) as ChatGPT-consumable tools for franchise restaurant operators.
+A self-hosted Node.js/Express [MCP](https://modelcontextprotocol.io) server, designed to run on Azure App Service, that exposes Square Labor operations (scheduling, timecards, payroll/tip reconciliation) as tool calls for franchise restaurant operators using **Microsoft Copilot Studio Agents**.
 
-This guide covers **adopting and integrating** this server as a ChatGPT connector/App and understanding its tool catalog, identity model, and security posture. It does not cover Azure deployment/infrastructure setup. For the non-technical, owner-facing guide, see [ReadMe.md](ReadMe.md).
+This guide covers **adopting and integrating** this server as a Copilot Studio custom connector/agent and understanding its tool catalog, identity model, and security posture. It does not cover Azure deployment/infrastructure setup. For the non-technical, owner-facing guide, see [ReadMe.md](ReadMe.md).
 
 ## Contents
 
 - [Architecture overview](#architecture-overview)
 - [Identity chain](#identity-chain)
 - [Tool catalog reference](#tool-catalog-reference)
-- [ChatGPT connector integration](#chatgpt-connector-integration)
+- [Copilot Studio connector integration](#copilot-studio-connector-integration)
 - [Security model summary](#security-model-summary)
 - [Known limitations](#known-limitations)
 - [Extending the server](#extending-the-server)
@@ -19,32 +19,32 @@ This guide covers **adopting and integrating** this server as a ChatGPT connecto
 
 ## Architecture overview
 
-The composition root ([src/server/AppServer.js](src/server/AppServer.js)) wires every service and tool at startup. There are **two independent OAuth legs** — one proves the caller's enterprise identity, the other authorizes access to a specific Square merchant:
+The composition root ([src/server/AppServer.js](src/server/AppServer.js)) wires every service and tool at startup. There are **two independent identity legs** — one proves the caller's enterprise identity, the other authorizes access to a specific Square merchant:
 
 ```mermaid
 flowchart TD
-    ChatGPT["ChatGPT MCP Client"] -->|"1. PKCE authorize"| Broker["OAuthBrokerController\n(/oauth/authorize, /oauth/token)"]
-    Broker -->|"2. delegates sign-in"| Entra["EntraOAuthService\n(enterprise identity)"]
-    ChatGPT -->|"3. POST /mcp\nBearer: broker-issued JWT"| McpEP["McpEndpointController"]
-    McpEP --> Tools["11 McpTool instances"]
+    Copilot["Copilot Studio Agent"] -->|"1. sign-in (platform-managed, no PKCE)"| EasyAuth["Azure App Service Authentication\n(Microsoft Entra ID provider)"]
+    EasyAuth -->|"2. POST /mcp\nX-MS-CLIENT-PRINCIPAL* headers"| McpEP["McpEndpointController"]
+    McpEP --> AuthMw["EasyAuthPrincipal middleware"]
+    AuthMw --> Tools["11 McpTool instances"]
     Tools --> Resolver["SquareContextResolver"]
     Resolver -->|"per-owner token"| KV[("Azure Key Vault")]
     Resolver --> SquareSDK["Square SDK client\n(scoped to caller's access token)"]
-    Owner["Franchise owner's browser"] -->|"4. Connect Square link"| SquareOAuthCtl["SquareOAuthController"]
+    Owner["Franchise owner's browser"] -->|"3. Connect Square link"| SquareOAuthCtl["SquareOAuthController"]
     SquareOAuthCtl --> SquareSDK
 ```
 
 <details>
-<summary><strong>Why a custom OAuth broker exists</strong></summary>
+<summary><strong>Why there's no custom OAuth broker</strong></summary>
 
-ChatGPT's MCP client requires the authorization server's discovery metadata to advertise `code_challenge_methods_supported: ["S256"]` (PKCE). Microsoft Entra ID's own discovery document doesn't reliably advertise this, so [OAuthBrokerController.js](src/web/routes/OAuthBrokerController.js) is a minimal, purpose-built PKCE authorization server that fronts an Entra sign-in and mints its own RS256-signed access token — scoped only to this MCP resource, never to Entra itself.
+Earlier revisions of this server fronted Entra ID with a purpose-built PKCE authorization server, because ChatGPT's MCP client required discovery metadata advertising `code_challenge_methods_supported: ["S256"]`, which Entra's own discovery document doesn't reliably advertise. Microsoft Copilot Studio's connectors authenticate through the platform and don't have that PKCE requirement, so this server now delegates the entire enterprise sign-in to **Azure App Service Authentication ("Easy Auth")**, configured directly on the App Service resource (Microsoft Entra ID provider, "Require authentication"). The platform validates the sign-in and rejects unauthenticated requests before they ever reach this Node process; authenticated requests arrive with the caller's identity in `X-MS-CLIENT-PRINCIPAL*` headers. This removes an entire class of in-code OAuth/PKCE/JWT-verification logic and its attack surface.
 
 </details>
 
 ## Identity chain
 
-1. **Enterprise identity (who is this business/owner?)** — [EntraOAuthService.js](src/services/EntraOAuthService.js) exchanges an Entra authorization code for a verified `{tenantId, objectId}` pair from the signed ID token.
-2. **Broker access token** — [BrokerTokenSigner.js](src/services/BrokerTokenSigner.js) issues an RS256 JWT carrying `tid`/`oid` claims, verified per-request by [McpTokenVerifier.js](src/services/McpTokenVerifier.js) via the MCP SDK's `requireBearerAuth`.
+1. **Enterprise identity (who is this business/owner?)** — proven entirely by Azure App Service Authentication before the request reaches this app. [EasyAuthPrincipal.js](src/web/middleware/EasyAuthPrincipal.js) reads the `X-MS-CLIENT-PRINCIPAL` header (base64-encoded JSON claims) App Service injects, extracting the `tid`/`oid` claims, and rejects (401) any request lacking them.
+2. **Principal attachment** — the middleware attaches `req.auth.extra = { tid, oid, displayName }` in the same shape the MCP transport already forwards as `ctx.http.authInfo`, so [Principal.js](src/tools/base/Principal.js)'s `resolvePrincipal` and every tool are unchanged from before this migration.
 3. **Square context resolution** — [SquareContextResolver.js](src/services/SquareContextResolver.js) maps `principalId` (`tenantId:objectId`) to a deterministic Key Vault secret name (`square-oauth-{tenantId}-{objectId}`), retrieves that owner's Square OAuth token (refreshing proactively at 75% of its validity window), and constructs a Square SDK client scoped to that token plus the `authorizedLocations` for that merchant.
 
 Every tool call resolves its own `SquareContext` from the caller's principal — no tool ever accepts a raw `merchant_id`/`location_id` from the model; location authorization is enforced server-side via `SquareContext.requireAuthorizedLocation`.
@@ -72,31 +72,31 @@ Two tools implement **gated writes**:
 - `commit_cash_tips` requires a `preview_token` minted by a prior `reconcile_cash_tips` call ([PreviewTokenSigner.js](src/services/PreviewTokenSigner.js)) — it can only commit an allocation that was actually computed by the server, never one asserted fresh by the model.
 - `publish_schedule` and `commit_cash_tips` both re-read the current Square record (`version`/timecard state) immediately before writing, to satisfy Square's optimistic-concurrency requirement and avoid acting on stale data.
 
-## ChatGPT connector integration
+## Copilot Studio connector integration
 
-- **Discovery metadata** — [AppServer.js](src/server/AppServer.js) mounts `mcpAuthMetadataRouter` (RFC 8414/9728), advertising `code_challenge_methods_supported: ["S256"]`, the broker's `/oauth/authorize`, `/oauth/token`, and `/.well-known/jwks.json` endpoints.
-- **Domain-ownership proof** — `/.well-known/openai-apps-challenge` serves a static token required for ChatGPT connector registration.
-- **Transport** — [McpEndpointController.js](src/web/routes/McpEndpointController.js) uses a **stateless** Streamable HTTP transport (`sessionIdGenerator: undefined`) — a fresh transport is created per request, connected to one shared `McpServer` instance. There is no server-side conversation/session state; all continuity lives in the ChatGPT client.
-- **Scheduled Tasks compatibility** — ChatGPT's scheduled/recurring tasks are **not supported with Custom GPTs**, only with direct Apps/connectors — relevant if this server is ever wrapped in a Custom GPT rather than exposed as a direct connector. Tasks also pause automatically when an action needs additional user confirmation, which aligns with this server's gated-write design (`commit_cash_tips`, `publish_schedule`) — an unattended scheduled run can safely execute the read-only/draft tools, then should pause rather than auto-approve a write.
-- **Tool annotations** — each tool's `readOnlyHint`/`destructiveHint`/`idempotentHint` (see `static annotations` on each class in [src/tools/](src/tools/)) are the signal ChatGPT's client UI uses to decide whether to show its own confirmation prompt before invoking a tool — a second, client-side layer of human-in-the-loop independent of the server's own preview/draft gates.
+- **Authentication configuration** — enable **Authentication** on the App Service resource (Azure Portal → App Service → Authentication → Add identity provider → Microsoft), set it to **Require authentication**, and register the same Entra ID app registration (or a dedicated one) that Copilot Studio's agent uses to reach this connector. No PKCE/discovery metadata is served by this app — App Service itself is the authorization server Copilot Studio talks to.
+- **No PKCE requirement** — unlike ChatGPT's MCP client, Copilot Studio's custom connector OAuth flow does not require `code_challenge_methods_supported: ["S256"]` discovery metadata, which is why the in-code PKCE broker used previously is no longer needed.
+- **Transport** — [McpEndpointController.js](src/web/routes/McpEndpointController.js) uses a **stateless** Streamable HTTP transport (`sessionIdGenerator: undefined`) — a fresh transport is created per request, connected to one shared `McpServer` instance. There is no server-side conversation/session state; all continuity lives in the Copilot Studio agent/conversation.
+- **Tool annotations** — each tool's `readOnlyHint`/`destructiveHint`/`idempotentHint` (see `static annotations` on each class in [src/tools/](src/tools/)) are the signal an MCP-aware client UI uses to decide whether to show its own confirmation prompt before invoking a tool — a second, client-side layer of human-in-the-loop independent of the server's own preview/draft gates.
 
 ## Security model summary
 
 | Mechanism                                 | File                                                                                                                                                                               | Purpose                                                                                                            |
 | ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| PKCE (S256) + signed authorization codes  | [OAuthBrokerController.js](src/web/routes/OAuthBrokerController.js)                                                                                                                | Standard OAuth code-interception protection for the ChatGPT sign-in leg                                            |
+| Azure App Service Authentication          | (platform configuration, not in-repo)                                                                                                                                              | Verifies the caller's Entra ID sign-in before the request reaches this app; rejects unauthenticated requests       |
+| Easy Auth principal extraction + 401 gate | [EasyAuthPrincipal.js](src/web/middleware/EasyAuthPrincipal.js)                                                                                                                    | Reads the platform-verified `tid`/`oid` claims from `X-MS-CLIENT-PRINCIPAL*` headers; rejects requests missing them |
 | HMAC-signed, principal-bound state tokens | [OAuthStateSigner.js](src/services/OAuthStateSigner.js)                                                                                                                            | Prevents a Square "connect" link minted for one owner from being replayed to attach another owner's Square account |
 | HMAC-signed preview tokens (~15 min TTL)  | [PreviewTokenSigner.js](src/services/PreviewTokenSigner.js)                                                                                                                        | Ensures `commit_cash_tips` can only write an allocation the server itself computed                                 |
-| RS256 broker access tokens + JWKS         | [BrokerTokenSigner.js](src/services/BrokerTokenSigner.js)                                                                                                                          | Lets ChatGPT verify tokens are issued by this server, published via `/.well-known/jwks.json`                       |
 | Per-owner Key Vault secret isolation      | [SquareContextResolver.js](src/services/SquareContextResolver.js)                                                                                                                  | One Square OAuth connection per Entra principal, keyed deterministically, never shared across owners               |
 | Server-side location authorization        | [SquareContext.js](src/services/SquareContext.js)                                                                                                                                  | The model can name a location; only server-side lookup against `authorizedLocations` decides if it's valid         |
 | Optimistic concurrency re-reads           | [CommitCashTipsTool.js](src/tools/CommitCashTipsTool.js), [PublishScheduleTool.js](src/tools/PublishScheduleTool.js), [UpdateDraftShiftTool.js](src/tools/UpdateDraftShiftTool.js) | Always re-fetch current `version`/state immediately before a write, never reuse a version from an earlier read     |
 
 ## Known limitations
 
-- **In-memory OAuth broker state** — `OAuthBrokerController`'s pending-request and authorization-code maps are process-local. Fine for a single instance; a restart or scale-out to multiple instances can drop in-flight sign-ins.
+- **Easy Auth is a hard platform dependency** — this app no longer verifies any token itself; if Authentication is disabled or misconfigured on the App Service resource, `/mcp` will reject every request with 401 (fail-closed), but there is also no in-code fallback identity provider.
+- **Local development bypass** — `EasyAuthDevPrincipal` (see [.env.example](.env.example)) simulates a signed-in principal for `npm run dev`; it's ignored whenever `WEBSITE_HOSTNAME` is set (i.e., on any real App Service deployment), but should never be set in a production App Service configuration slot regardless.
 - **Hardcoded overtime threshold** — `ScheduledShiftService.OVERTIME_WEEKLY_HOURS_THRESHOLD = 40` is a US-federal default, not jurisdiction-aware.
-- **No persisted scheduling "Rulebook"** — employee availability/preferences are handled conversationally only; there's no server-side store, so constraints don't carry over between separate ChatGPT conversations (a single ongoing scheduled task's thread is the closest approximation today).
+- **No persisted scheduling "Rulebook"** — employee availability/preferences are handled conversationally only; there's no server-side store, so constraints don't carry over between separate conversations.
 - **Over-scoped OAuth request** — `EMPLOYEES_READ` and `TIMECARDS_SETTINGS_WRITE` are requested in `SQUARE_OAUTH_SCOPES` but no current tool exercises them (no `teamMembers`/`team.listJobs` calls, no workweek-config writes) — candidates for either trimming or building out the corresponding tools.
 - **`workweekConfigs.list()` assumption** — `get_schedule_constraints` takes `page.data[0]`, assuming one workweek config per business; unverified against a multi-location seller with distinct configs.
 - **Scheduling endpoints are Beta** — Square's `ScheduledShift` family (create/update/publish/search) is marked Beta in Square's own API reference.
@@ -116,8 +116,9 @@ For any tool that writes data, follow the existing gated-write pattern: re-read 
 
 | Term                          | Meaning                                                                                                                                   |
 | ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| **MCP**                       | Model Context Protocol — the standard this server implements to expose tools to ChatGPT and other MCP clients                             |
-| **Principal**                 | The authenticated enterprise identity (`tenantId:objectId`) resolved from the broker-issued access token                                  |
+| **MCP**                       | Model Context Protocol — the standard this server implements to expose tools to Copilot Studio and other MCP clients                      |
+| **Easy Auth**                 | Azure App Service Authentication — the platform feature that authenticates callers before requests reach this app                        |
+| **Principal**                 | The authenticated enterprise identity (`tenantId:objectId`) resolved from the Easy Auth `X-MS-CLIENT-PRINCIPAL*` headers                  |
 | **Draft vs. published shift** | Square's native two-phase scheduling lifecycle — draft shifts are invisible to staff until explicitly published                           |
 | **Preview token**             | A short-lived, server-signed token embedding a computed result (e.g. a tip allocation) that a later "commit" call must present unmodified |
 | **Gated write**               | A tool that changes data in Square only after an explicit approval step, as opposed to a read-only/preview tool                           |

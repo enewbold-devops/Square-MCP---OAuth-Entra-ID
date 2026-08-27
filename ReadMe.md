@@ -2,7 +2,7 @@
 
 ## Alan Newbold (AI Engine) | developer@e-newbold.com
 
-A ChatGPT-connected assistant that helps franchise owners and managers handle **scheduling, timecards, and payroll/tip reconciliation** for locations running on Square — without leaving a normal ChatGPT conversation.
+A Microsoft Copilot Studio-connected assistant that helps franchise owners and managers handle **scheduling, timecards, and payroll/tip reconciliation** for locations running on Square — without leaving a normal Copilot conversation.
 
 This guide is written for franchise owners, managers, and operators. No technical background required. If you're the person setting this server up or maintaining it, see [TechnicalGuide.md](TechnicalGuide.md) instead.
 
@@ -19,12 +19,12 @@ This guide is written for franchise owners, managers, and operators. No technica
 
 ## What this is
 
-Think of this as a coworker who already has access to your Square account's scheduling and payroll data, and who you talk to right inside ChatGPT. You ask questions or give instructions in plain English; it looks up the real data in Square, does the math, and — for anything that actually changes something (like publishing a schedule or paying out tips) — checks with you before it acts.
+Think of this as a coworker who already has access to your Square account's scheduling and payroll data, and who you talk to right inside Copilot Studio. You ask questions or give instructions in plain English; it looks up the real data in Square, does the math, and — for anything that actually changes something (like publishing a schedule or paying out tips) — checks with you before it acts.
 
 ```mermaid
 flowchart LR
-    Owner["You\n(Franchise Owner / Manager)"] <--> ChatGPT["ChatGPT"]
-    ChatGPT <--> Assistant["Square Operations\nAssistant"]
+    Owner["You\n(Franchise Owner / Manager)"] <--> Copilot["Copilot Studio Agent"]
+    Copilot <--> Assistant["Square Operations\nAssistant"]
     Assistant <--> Square["Your Square Account\n(Scheduling, Timecards, Payroll)"]
 ```
 
@@ -43,9 +43,9 @@ Nothing about this replaces Square — it's a faster, conversational way to work
 ## Getting connected
 
 <details>
-<summary><strong>Step 1 — Add the connector in ChatGPT</strong></summary>
+<summary><strong>Step 1 — Add the connector in Copilot Studio</strong></summary>
 
-Ask your administrator or implementation contact for the connector link for your business. Adding it works the same way as adding any other ChatGPT app/connector.
+Ask your administrator or implementation contact for the connector link for your business. Adding it works the same way as adding any other Copilot Studio connector/agent.
 
 </details>
 
@@ -65,7 +65,7 @@ You can also just ask: _"Am I connected to Square?"_
 
 </details>
 
-Once both steps are done, every tool below is available in any ChatGPT conversation.
+Once both steps are done, every tool below is available in any Copilot Studio conversation.
 
 ## What you can ask
 
@@ -109,7 +109,7 @@ This means you can freely ask "what if" questions and review drafts without any 
 
 ## Scheduled automations
 
-If your ChatGPT plan supports scheduled/recurring tasks, you can set one up like _"every Thursday evening, draft next week's schedule and prep payroll for review."_ The read-only and drafting steps will run automatically. Anything that requires your approval — publishing the schedule, recording a tip payout — will pause and wait for you to open the conversation and confirm, rather than happening unattended.
+If your Copilot Studio agent supports scheduled/recurring topics, you can set one up like _"every Thursday evening, draft next week's schedule and prep payroll for review."_ The read-only and drafting steps will run automatically. Anything that requires your approval — publishing the schedule, recording a tip payout — will pause and wait for you to open the conversation and confirm, rather than happening unattended.
 
 ## Data & privacy basics
 

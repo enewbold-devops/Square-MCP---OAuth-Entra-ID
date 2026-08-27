@@ -3,7 +3,7 @@
 // this is the only integration point between the platform-level Entra sign-in and the rest of the
 // app, so SquareContextResolver, McpTool, and every tool need zero changes.
 //
-// When "Authentication" is enabled on the App Service resource with an Microsoft Entra ID identity
+// When "Authentication" is enabled on the App Service resource with a Microsoft Entra ID identity
 // provider and "Require authentication", the platform validates the sign-in and OAuth token before
 // the request ever reaches this Node process, then forwards the caller's identity via the
 // X-MS-CLIENT-PRINCIPAL* headers below - no in-code OAuth broker, PKCE handling, or JWT

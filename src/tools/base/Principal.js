@@ -1,5 +1,6 @@
 // Derives the caller's stable enterprise identity from the AuthInfo the MCP transport attaches to
-// each request (populated by requireBearerAuth from the broker-issued access token).
+// each request (populated by the EasyAuthPrincipal middleware from Azure App Service Authentication's
+// verified X-MS-CLIENT-PRINCIPAL* headers).
 export function resolvePrincipal(ctx) {
     const extra = ctx?.http?.authInfo?.extra;
     const tenantId = extra?.tid;
