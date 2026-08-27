@@ -58,6 +58,8 @@ export class ReconcileCashTipsTool extends McpTool {
         const result = TimecardService.allocateCashTips(timecards, entriesWithLocation, args.allocation_method || 'equal_split');
 
         const previewToken = await this.#previewTokenSigner.sign({
+            principalId: principal.principalId,
+            merchantId: squareContext.merchantId,
             locationId: location.id,
             payPeriodStart: args.pay_period_start,
             payPeriodEnd: args.pay_period_end,

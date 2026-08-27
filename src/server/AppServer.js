@@ -10,6 +10,7 @@ import { easyAuthPrincipal } from '../web/middleware/EasyAuthPrincipal.js';
 
 import { WhoAmITool } from '../tools/WhoAmITool.js';
 import { SquareConnectAccountTool } from '../tools/SquareConnectAccountTool.js';
+import { SquareDisconnectAccountTool } from '../tools/SquareDisconnectAccountTool.js';
 import { PreparePayrollReconciliationTool } from '../tools/PreparePayrollReconciliationTool.js';
 import { GetTimecardExceptionsTool } from '../tools/GetTimecardExceptionsTool.js';
 import { ReconcileCashTipsTool } from '../tools/ReconcileCashTipsTool.js';
@@ -50,11 +51,16 @@ export class AppServer {
         // no in-code OAuth broker/PKCE handling/JWT verification is needed here. This also drops the
         // PKCE requirement ChatGPT's MCP client enforced, unblocking Microsoft Copilot Studio Agents,
         // which authenticate through the platform and don't need PKCE discovery metadata.
-        const authMiddleware = easyAuthPrincipal({ devPrincipal: this.#config.easyAuthDevPrincipal });
+        const authMiddleware = easyAuthPrincipal({
+            devPrincipal: this.#config.easyAuthDevPrincipal,
+            devRoles: this.#config.easyAuthDevRoles,
+            allowedTenantIds: this.#config.entraAllowedTenantIds,
+        });
 
         const tools = [
             new WhoAmITool(squareContextResolver),
             new SquareConnectAccountTool(squareContextResolver, oauthStateSigner, this.#config),
+            new SquareDisconnectAccountTool(squareContextResolver),
             new PreparePayrollReconciliationTool(squareContextResolver),
             new GetTimecardExceptionsTool(squareContextResolver),
             new ReconcileCashTipsTool(squareContextResolver, previewTokenSigner),
@@ -74,7 +80,18 @@ export class AppServer {
             allowedOrigins: this.#config.allowedHosts,
         });
 
-        new SquareOAuthController({ config: this.#config, oauthStateSigner, squareOAuthService, keyVaultService }).registerRoutes(app);
+        // These two endpoints are deliberately safe to expose anonymously only after App Service
+        // Authentication excludes them: /healthz returns no identity data, and Square's callback is
+        // protected by a single-use signed transaction. /square/oauth/start remains Easy Auth-gated.
+        app.get('/healthz', (_req, res) => res.status(200).json({ status: 'ok' }));
+
+        new SquareOAuthController({
+            config: this.#config,
+            oauthStateSigner,
+            squareOAuthService,
+            keyVaultService,
+            authMiddleware,
+        }).registerRoutes(app);
         new McpEndpointController({
             serverName: SERVER_NAME,
             serverVersion: SERVER_VERSION,

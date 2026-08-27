@@ -6,6 +6,8 @@ export class AppConfig {
     allowedHosts;
     publicBaseUrl;
     easyAuthDevPrincipal;
+    easyAuthDevRoles;
+    entraAllowedTenantIds;
 
     constructor(env = process.env) {
         this.keyVaultUri = this.#require(env, 'KeyVaultUri');
@@ -14,6 +16,8 @@ export class AppConfig {
         this.allowedHosts = this.#resolveAllowedHosts(env);
         this.publicBaseUrl = this.#resolvePublicBaseUrl(env);
         this.easyAuthDevPrincipal = this.#resolveEasyAuthDevPrincipal(env);
+        this.easyAuthDevRoles = this.#resolveCommaSeparated(env.EasyAuthDevRoles);
+        this.entraAllowedTenantIds = this.#resolveAllowedTenantIds(env);
     }
 
     // Local-only stand-in for App Service Authentication, which never runs outside App Service
@@ -30,8 +34,13 @@ export class AppConfig {
     // Same WEBSITE_HOSTNAME signal as #resolveAllowedHosts - the broker's issuer/redirect URIs must
     // match wherever this app is actually reachable, with no separate env setting to keep in sync.
     #resolvePublicBaseUrl(env) {
+        if (env.PublicBaseUrl) {
+            return this.#resolveHttpsOrigin(env.PublicBaseUrl, 'PublicBaseUrl');
+        }
         if (env.WEBSITE_HOSTNAME) {
-            return `https://${env.WEBSITE_HOSTNAME}`;
+            // The configured Square callback is authoritative when the MCP server is exposed through
+            // a custom domain. WEBSITE_HOSTNAME only contains App Service's default hostname.
+            return this.#resolveHttpsOrigin(this.squareOAuthRedirectUri, 'SquareOAuthRedirectUri');
         }
         return `http://localhost:${Number(env.PORT) || 3000}`;
     }
@@ -39,11 +48,56 @@ export class AppConfig {
     // WEBSITE_HOSTNAME is auto-injected by Azure App Service (absent locally) - keeps the MCP
     // transport's Host-header allowlist in sync with wherever this app is actually reachable.
     #resolveAllowedHosts(env) {
-        const hosts = new Set(['localhost', '127.0.0.1', '[::1]', 'enewbold-square-mcp-d8bvfkazg9h7hjdn.eastus-01.azurewebsites.net']);
+        const hosts = new Set();
+
+        for (const host of this.#resolveCommaSeparated(env.McpAllowedHosts)) {
+            hosts.add(this.#normalizeHostname(host, 'McpAllowedHosts'));
+        }
         if (env.WEBSITE_HOSTNAME) {
-            hosts.add(env.WEBSITE_HOSTNAME);
+            hosts.add(this.#normalizeHostname(env.WEBSITE_HOSTNAME, 'WEBSITE_HOSTNAME'));
+        } else {
+            hosts.add('localhost');
+            hosts.add('127.0.0.1');
+            hosts.add('[::1]');
         }
         return [...hosts];
+    }
+
+    #resolveAllowedTenantIds(env) {
+        const tenantIds = this.#resolveCommaSeparated(env.EntraAllowedTenantIds);
+        if (env.WEBSITE_HOSTNAME && tenantIds.length === 0) {
+            throw new Error('EntraAllowedTenantIds must be configured on Azure App Service.');
+        }
+        return tenantIds;
+    }
+
+    #resolveCommaSeparated(value) {
+        return (value ?? '')
+            .split(',')
+            .map((item) => item.trim())
+            .filter(Boolean);
+    }
+
+    #resolveHttpsOrigin(value, settingName) {
+        let url;
+        try {
+            url = new URL(value);
+        } catch {
+            throw new Error(`${settingName} must be a valid HTTPS URL.`);
+        }
+        if (url.protocol !== 'https:') {
+            throw new Error(`${settingName} must use HTTPS on Azure App Service.`);
+        }
+        return url.origin;
+    }
+
+    #normalizeHostname(value, settingName) {
+        try {
+            // URL handles a hostname with an optional port and returns a normalized hostname.
+            return new URL(`https://${value}`).hostname;
+        } catch {
+            throw new Error(`${settingName} contains an invalid hostname: ${value}`);
+        }
     }
 
     #require(env, name) {

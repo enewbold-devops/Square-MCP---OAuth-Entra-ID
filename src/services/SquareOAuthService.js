@@ -86,4 +86,23 @@ export class SquareOAuthService {
             grantType: 'refresh_token',
         });
     }
+
+    async revokeToken(accessToken) {
+        const { applicationId, applicationSecret } = await this.getApplicationCredentials();
+        const environment = await this.#getEnvironmentName();
+        const revokeUrl =
+            environment === 'production' ? 'https://connect.squareup.com/oauth2/revoke' : 'https://connect.squareupsandbox.com/oauth2/revoke';
+
+        const response = await fetch(revokeUrl, {
+            method: 'POST',
+            headers: {
+                Authorization: `Client ${applicationSecret}`,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ client_id: applicationId, access_token: accessToken }),
+        });
+        if (!response.ok) {
+            throw new Error(`Square token revocation failed with HTTP ${response.status}.`);
+        }
+    }
 }

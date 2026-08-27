@@ -7,7 +7,7 @@ export class PublishScheduleTool extends McpTool {
     static description = 'Publishes draft scheduled shifts, making them visible to staff and triggering notifications. Requires explicit shift IDs and owner approval - this is the consequential step in scheduling.';
     static inputSchema = z.object({
         scheduled_shift_ids_json: z.string().describe('JSON array of scheduled shift IDs to publish.'),
-        approved_by: z.string().describe('Name or identifier of the person approving this publish.'),
+        approval_note: z.string().describe('Optional human approval note for the audit record.').optional(),
         notification_audience: z.string().describe('Optional: "ALL", "AFFECTED" (default), or "NONE".').optional(),
     });
     static outputSchema = z.object({
@@ -15,7 +15,7 @@ export class PublishScheduleTool extends McpTool {
         publishedCount: z.number(),
         results: z.array(z.object({ scheduledShiftId: z.string(), success: z.boolean(), errors: z.any().nullable() })),
     });
-    static annotations = { readOnlyHint: false, destructiveHint: false, openWorldHint: true };
+    static annotations = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true };
 
     #squareContextResolver;
 
@@ -41,6 +41,8 @@ export class PublishScheduleTool extends McpTool {
         const current = [];
         for (const id of shiftIds) {
             const { scheduledShift } = await squareContext.client.labor.retrieveScheduledShift({ id });
+            const details = scheduledShift.draftShiftDetails ?? scheduledShift.publishedShiftDetails;
+            squareContext.requireAuthorizedLocation(details?.locationId);
             current.push(scheduledShift);
         }
 
@@ -63,7 +65,7 @@ export class PublishScheduleTool extends McpTool {
         }));
 
         return {
-            approvedBy: args.approved_by,
+            approvedBy: principal.displayName || principal.objectId,
             publishedCount: results.filter((result) => result.success).length,
             results,
         };

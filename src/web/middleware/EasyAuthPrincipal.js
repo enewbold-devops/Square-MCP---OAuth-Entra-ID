@@ -12,9 +12,14 @@
 const OID_CLAIM_TYPES = new Set(['oid', 'http://schemas.microsoft.com/identity/claims/objectidentifier']);
 const TID_CLAIM_TYPES = new Set(['tid', 'http://schemas.microsoft.com/identity/claims/tenantid']);
 const NAME_CLAIM_TYPES = new Set(['name', 'http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name']);
+const ROLE_CLAIM_TYPES = new Set(['roles', 'http://schemas.microsoft.com/ws/2008/06/identity/claims/role']);
 
 function findClaim(claims, types) {
     return claims.find((claim) => types.has(claim?.typ))?.val;
+}
+
+function findClaims(claims, types) {
+    return claims.filter((claim) => types.has(claim?.typ) && typeof claim?.val === 'string').map((claim) => claim.val);
 }
 
 // Decodes the base64-encoded X-MS-CLIENT-PRINCIPAL header App Service injects on every authenticated
@@ -40,11 +45,12 @@ function principalFromHeaders(req) {
     // (the AAD object id) - preferred fallback when the claims array doesn't carry it directly.
     const objectId = findClaim(claims, OID_CLAIM_TYPES) ?? singleHeader(req.headers['x-ms-client-principal-id']);
     const displayName = findClaim(claims, NAME_CLAIM_TYPES) ?? singleHeader(req.headers['x-ms-client-principal-name']);
+    const roles = findClaims(claims, ROLE_CLAIM_TYPES);
 
     if (!tenantId || !objectId) {
         return null;
     }
-    return { tid: tenantId, oid: objectId, displayName };
+    return { tid: tenantId, oid: objectId, displayName, roles };
 }
 
 function singleHeader(value) {
@@ -54,7 +60,7 @@ function singleHeader(value) {
 // Parses the "tenantId:objectId[:displayName]" dev-only override used to exercise the server
 // locally, where App Service never injects the X-MS-CLIENT-PRINCIPAL* headers. Never used when
 // running in App Service itself - see AppConfig#easyAuthDevPrincipal.
-function devPrincipalFrom(devPrincipal) {
+function devPrincipalFrom(devPrincipal, devRoles) {
     if (!devPrincipal) {
         return null;
     }
@@ -62,15 +68,15 @@ function devPrincipalFrom(devPrincipal) {
     if (!tenantId || !objectId) {
         return null;
     }
-    return { tid: tenantId, oid: objectId, displayName };
+    return { tid: tenantId, oid: objectId, displayName, roles: devRoles ?? [] };
 }
 
 // Express middleware factory: rejects requests App Service hasn't authenticated (or, locally,
 // requests without the dev override configured), otherwise attaches req.auth in the same shape
 // requireBearerAuth used to produce, so ToolRegistry/Principal.js are unaffected.
-export function easyAuthPrincipal({ devPrincipal } = {}) {
+export function easyAuthPrincipal({ devPrincipal, devRoles, allowedTenantIds = [] } = {}) {
     return (req, res, next) => {
-        const principal = principalFromHeaders(req) ?? devPrincipalFrom(devPrincipal);
+        const principal = principalFromHeaders(req) ?? devPrincipalFrom(devPrincipal, devRoles);
 
         if (!principal) {
             res.status(401).json({
@@ -81,12 +87,20 @@ export function easyAuthPrincipal({ devPrincipal } = {}) {
             return;
         }
 
+        if (allowedTenantIds.length > 0 && !allowedTenantIds.includes(principal.tid)) {
+            res.status(403).json({ error: 'forbidden', error_description: 'The Entra tenant is not authorized for this MCP server.' });
+            return;
+        }
+
         req.auth = {
             token: undefined,
             clientId: 'easyauth',
-            scopes: ['mcp.read', 'mcp.write'],
+            scopes: [],
             expiresAt: undefined,
-            extra: principal,
+            extra: {
+                ...principal,
+                requestId: singleHeader(req.headers['x-ms-request-id']) ?? singleHeader(req.headers['x-arr-log-id']),
+            },
         };
         next();
     };

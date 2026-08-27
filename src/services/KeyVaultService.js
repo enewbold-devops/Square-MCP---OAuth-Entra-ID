@@ -28,6 +28,21 @@ export class KeyVaultService {
         await this.#getClient().setSecret(secretName, JSON.stringify(tokenPayload));
     }
 
+    async markSquareTokenRevoked(secretName) {
+        await this.setSquareToken(secretName, { revokedAt: new Date().toISOString() });
+    }
+
+    async listSquareConnectionPrincipalIds() {
+        const principalIds = [];
+        for await (const secret of this.#getClient().listPropertiesOfSecrets()) {
+            const match = /^square-oauth-([0-9a-f-]{36})-([0-9a-f-]{36})$/i.exec(secret.name ?? '');
+            if (match) {
+                principalIds.push(`${match[1]}:${match[2]}`);
+            }
+        }
+        return principalIds;
+    }
+
     // Plain-string secret getter for static app credentials (Square app id/secret, signing keys).
     async getSecret(secretName) {
         const secret = await this.#getClient().getSecret(secretName);
@@ -38,6 +53,39 @@ export class KeyVaultService {
     // rather than provisioned ahead of time.
     async setSecret(secretName, value) {
         await this.#getClient().setSecret(secretName, value);
+    }
+
+    async tryGetSquareToken(secretName) {
+        const value = await this.tryGetSecret(secretName);
+        return value ? JSON.parse(value) : null;
+    }
+
+    async createOAuthTransaction(nonce, transaction) {
+        const expiresOn = new Date(transaction.expiresAt);
+        await this.#getClient().setSecret(this.#oauthTransactionSecretName(nonce), JSON.stringify(transaction), { expiresOn });
+    }
+
+    // Begin deletion before reading any transaction data. Key Vault accepts this state transition
+    // only once, so callers racing to use the same nonce cannot both succeed.
+    async consumeOAuthTransaction(nonce) {
+        const secretName = this.#oauthTransactionSecretName(nonce);
+        try {
+            const poller = await this.#getClient().beginDeleteSecret(secretName);
+            await poller.pollUntilDone();
+            return true;
+        } catch (error) {
+            if (error.statusCode === 404 || error.code === 'SecretNotFound') {
+                return false;
+            }
+            throw error;
+        }
+    }
+
+    #oauthTransactionSecretName(nonce) {
+        if (!/^[a-f0-9]{32}$/i.test(nonce)) {
+            throw new Error('Invalid OAuth transaction nonce.');
+        }
+        return `mcp-oauth-tx-${nonce}`;
     }
 
     // Returns null instead of throwing when the secret has never been created, so callers can

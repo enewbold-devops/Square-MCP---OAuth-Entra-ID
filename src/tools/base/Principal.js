@@ -13,5 +13,7 @@ export function resolvePrincipal(ctx) {
         tenantId,
         objectId,
         displayName: extra?.displayName,
+        roles: Array.isArray(extra?.roles) ? extra.roles : [],
+        requestId: extra?.requestId,
     };
 }

@@ -10,7 +10,7 @@ export class CommitCashTipsTool extends McpTool {
     static description = 'Writes an owner-approved cash-tip allocation (from a prior reconcile_cash_tips preview) back to Square timecards. Requires a valid, unexpired preview_token.';
     static inputSchema = z.object({
         preview_token: z.string().describe('The previewToken returned by reconcile_cash_tips.'),
-        approved_by: z.string().describe('Name or identifier of the person approving this payroll action.'),
+        approval_note: z.string().describe('Optional human approval note for the audit record.').optional(),
         approved_timecard_ids_json: z
             .string()
             .describe('Optional JSON array of timecard IDs to commit (subset of the preview). Omit to commit all previewed allocations.')
@@ -38,7 +38,14 @@ export class CommitCashTipsTool extends McpTool {
             throw new Error('preview_token is missing, invalid, or expired. Run reconcile_cash_tips again before committing.');
         }
 
+        if (preview.principalId !== principal.principalId) {
+            throw new Error('preview_token belongs to a different Entra principal. Run reconciliation again.');
+        }
+
         const squareContext = await this.#squareContextResolver.resolve(principal.principalId);
+        if (preview.merchantId !== squareContext.merchantId) {
+            throw new Error('preview_token belongs to a different Square merchant. Run reconciliation again.');
+        }
 
         let approvedIds = null;
         if (args.approved_timecard_ids_json) {
@@ -62,6 +69,9 @@ export class CommitCashTipsTool extends McpTool {
                 // Re-read immediately before writing: the preview's data may be stale by approval time,
                 // and Timecard.version is required for optimistic concurrency on the update.
                 const { timecard: current } = await squareContext.client.labor.retrieveTimecard({ id: allocation.timecardId });
+                if (current.locationId !== preview.locationId) {
+                    throw new Error('The timecard no longer belongs to the approved Square location.');
+                }
                 const { id: _currentId, ...timecardFields } = current;
                 await squareContext.client.labor.updateTimecard({
                     id: allocation.timecardId,
@@ -77,7 +87,7 @@ export class CommitCashTipsTool extends McpTool {
         }
 
         return {
-            approvedBy: args.approved_by,
+            approvedBy: principal.displayName || principal.objectId,
             committedCount: results.filter((result) => result.success).length,
             results,
         };

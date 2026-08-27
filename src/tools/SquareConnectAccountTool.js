@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { McpTool } from './base/McpTool.js';
+import { SquareConnectionNotFoundError } from '../services/SquareContextResolver.js';
 
 // Entry point for linking a franchise owner's personal Square account. Mints a one-time,
 // principal-bound "Connect Square" link rather than ever returning a raw Square authorize URL -
@@ -31,8 +32,11 @@ export class SquareConnectAccountTool extends McpTool {
         try {
             const squareContext = await this.#squareContextResolver.resolve(principal.principalId);
             return { connected: true, merchantId: squareContext.merchantId, locationCount: squareContext.authorizedLocations.length };
-        } catch {
-            const link = await this.#oauthStateSigner.create(principal.principalId);
+        } catch (error) {
+            if (!(error instanceof SquareConnectionNotFoundError)) {
+                throw error;
+            }
+            const link = await this.#oauthStateSigner.create(principal.principalId, 'connect-link');
             const connectUrl = `${this.#config.publicBaseUrl}/square/oauth/start?link=${link}`;
             return { connected: false, connectUrl };
         }
