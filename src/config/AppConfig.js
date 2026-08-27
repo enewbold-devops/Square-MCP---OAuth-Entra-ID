@@ -5,6 +5,7 @@ export class AppConfig {
     port;
     allowedHosts;
     publicBaseUrl;
+    easyAuthDevPrincipal;
 
     constructor(env = process.env) {
         this.keyVaultUri = this.#require(env, 'KeyVaultUri');
@@ -12,6 +13,18 @@ export class AppConfig {
         this.port = Number(env.PORT) || 3000;
         this.allowedHosts = this.#resolveAllowedHosts(env);
         this.publicBaseUrl = this.#resolvePublicBaseUrl(env);
+        this.easyAuthDevPrincipal = this.#resolveEasyAuthDevPrincipal(env);
+    }
+
+    // Local-only stand-in for App Service Authentication, which never runs outside App Service
+    // itself (no X-MS-CLIENT-PRINCIPAL* headers locally). Format: "tenantId:objectId[:displayName]".
+    // Refuses to activate when WEBSITE_HOSTNAME is set, so a stray dev setting can never bypass
+    // Easy Auth on a real deployment.
+    #resolveEasyAuthDevPrincipal(env) {
+        if (env.WEBSITE_HOSTNAME || !env.EasyAuthDevPrincipal) {
+            return null;
+        }
+        return env.EasyAuthDevPrincipal;
     }
 
     // Same WEBSITE_HOSTNAME signal as #resolveAllowedHosts - the broker's issuer/redirect URIs must
