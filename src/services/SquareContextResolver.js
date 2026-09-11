@@ -1,15 +1,7 @@
 import { SquareContext } from './SquareContext.js';
 
-// Square recommends renewals every seven days or less, rather than waiting near its 30-day token
-// expiry. A scheduled worker invokes refreshIfDue for dormant connections.
-const MAX_TOKEN_AGE_MS = 7 * 24 * 60 * 60 * 1000;
-
-export class SquareConnectionNotFoundError extends Error {
-    constructor() {
-        super('No Square connection found for this account. Call square_connect_account to connect Square.');
-        this.name = 'SquareConnectionNotFoundError';
-    }
-}
+// Proactive refresh threshold: refresh once 75% of the access token's validity window has elapsed.
+const PROACTIVE_REFRESH_FRACTION = 0.75;
 
 export class SquareContextResolver {
     #keyVaultService;
@@ -44,23 +36,18 @@ export class SquareContextResolver {
     }
 
     async #getValidToken(principalId) {
-        const token = await this.#keyVaultService.tryGetSquareToken(SquareContextResolver.secretNameFor(principalId));
-        if (!token || token.revokedAt) {
-            throw new SquareConnectionNotFoundError();
-        }
-
-        if (!token.accessToken || !token.refreshToken || !token.expiresAt || !token.obtainedAt || !token.merchantId) {
-            throw new Error('The stored Square connection is incomplete. Reconnect Square or contact an administrator.');
+        let token;
+        try {
+            token = await this.#keyVaultService.getSquareToken(SquareContextResolver.secretNameFor(principalId));
+        } catch {
+            throw new Error('No Square connection found for this account. Call square_connect_account to connect Square.');
         }
 
         const obtainedAt = new Date(token.obtainedAt).getTime();
         const expiresAt = new Date(token.expiresAt).getTime();
-        if (!Number.isFinite(obtainedAt) || !Number.isFinite(expiresAt) || expiresAt <= obtainedAt) {
-            throw new Error('The stored Square connection has invalid token expiry metadata. Reconnect Square or contact an administrator.');
-        }
-        const refreshAt = Math.min(obtainedAt + MAX_TOKEN_AGE_MS, expiresAt - 60 * 60 * 1000);
+        const proactiveThreshold = obtainedAt + (expiresAt - obtainedAt) * PROACTIVE_REFRESH_FRACTION;
 
-        if (Date.now() < refreshAt) {
+        if (Date.now() < proactiveThreshold) {
             return token;
         }
         return this.#refreshSquareToken(principalId, token.refreshToken);
@@ -72,19 +59,5 @@ export class SquareContextResolver {
         const { locations } = await client.locations.list();
 
         return new SquareContext({ merchantId: token.merchantId, client, authorizedLocations: locations ?? [] });
-    }
-
-    async refreshIfDue(principalId) {
-        await this.#getValidToken(principalId);
-    }
-
-    async disconnect(principalId) {
-        const secretName = SquareContextResolver.secretNameFor(principalId);
-        const token = await this.#keyVaultService.tryGetSquareToken(secretName);
-        if (!token?.accessToken) {
-            throw new SquareConnectionNotFoundError();
-        }
-        await this.#squareOAuthService.revokeToken(token.accessToken);
-        await this.#keyVaultService.markSquareTokenRevoked(secretName);
     }
 }

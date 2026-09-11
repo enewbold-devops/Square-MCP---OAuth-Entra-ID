@@ -1,46 +1,162 @@
-# Square Franchise Operations MCP
+# Square Operations Assistant — Franchise Manager Guide
 
-Production-ready Node.js Streamable HTTP MCP server for Square workforce, scheduling, and payroll operations. It is designed for Azure App Service Authentication with Microsoft Entra ID and for use from a Power Platform custom connector.
+## Alan Newbold (AI Engine) | developer@e-newbold.com
 
-## Security model
+A ChatGPT-connected assistant that helps franchise owners and managers handle **scheduling, timecards, payroll/tip reconciliation, sales, catalog, and inventory intelligence** for locations running on Square — without leaving a normal ChatGPT conversation.
 
-`POST /mcp` is protected by App Service Authentication. Easy Auth validates the Power Platform user's Entra access token, then the server reads its verified `tid`, `oid`, and app-role claims from `X-MS-CLIENT-PRINCIPAL`. The server never forwards that token to Square.
+This guide is written for franchise owners, managers, and operators. No technical background required. If you're the person setting this server up or maintaining it, see [TechnicalGuide.md](TechnicalGuide.md) instead.
 
-Each call resolves a Square connection by the trusted Entra principal key (`tenantId:objectId`), reads that seller's OAuth token from Key Vault, and creates a request-scoped Square client. The application identity needs **Key Vault Secrets Officer** because it manages those token secrets and short-lived OAuth transactions.
+## Contents
 
-Tool access is deny-by-default and controlled by Entra app-role values defined in [infra/entra-api-manifest.json](infra/entra-api-manifest.json):
+- [What this is](#what-this-is)
+- [What it can help with](#what-it-can-help-with)
+- [Getting connected](#getting-connected)
+- [What you can ask](#what-you-can-ask)
+- [How approvals work](#how-approvals-work)
+- [Scheduled automations](#scheduled-automations)
+- [Data & privacy basics](#data--privacy-basics)
+- [FAQ](#faq)
 
-- `SquareMcp.Reader` — read-only workforce data.
-- `SquareMcp.Scheduler` — schedule reads and mutations.
-- `SquareMcp.PayrollApprover` — payroll reads, previews, and tip commits.
-- `SquareMcp.SquareConnector` — connect or revoke a caller's Square account.
-- `SquareMcp.Admin` — all operations.
+## What this is
 
-Every MCP invocation emits a secret-free structured audit event. Write tools derive the approver from the verified Entra principal, not tool input. Tip-preview tokens are bound to principal, merchant, and location.
+Think of this as a coworker who already has access to your Square account's scheduling and payroll data, and who you talk to right inside ChatGPT. You ask questions or give instructions in plain English; it looks up the real data in Square, does the math, and — for anything that actually changes something (like publishing a schedule or paying out tips) — checks with you before it acts.
 
-## Local development
+```mermaid
+flowchart LR
+    Owner["You\n(Franchise Owner / Manager)"] <--> ChatGPT["ChatGPT"]
+    ChatGPT <--> Assistant["Square Operations\nAssistant"]
+    Assistant <--> Square["Your Square Account\n(Scheduling, Timecards, Payroll)"]
+```
 
-1. Copy `.env.example` to `.env` and provide non-production Key Vault and Square values.
-2. Set `EasyAuthDevPrincipal` and `EasyAuthDevRoles=SquareMcp.Admin` for local requests. These settings are ignored whenever `WEBSITE_HOSTNAME` is present.
-3. Start with `npm start`.
+Nothing about this replaces Square — it's a faster, conversational way to work with the data that's already there.
 
-`GET /healthz` returns only `{ "status": "ok" }`. Every other public route requires authentication except the Square OAuth callback, which must be excluded from Easy Auth as described below.
+## What it can help with
 
-## Azure and Entra deployment
+| If this sounds familiar...                                             | The assistant can help by...                                                                                                              |
+| ---------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| "Building next week's schedule takes me most of a day"                 | Drafting a schedule from your instructions, which you review and publish when ready                                                       |
+| "I'm not sure if any timecards have problems before I run payroll"     | Checking every timecard for missed clock-outs, unclosed breaks, double-punches, or missing wage setup                                     |
+| "Splitting cash tips fairly is a manual, error-prone process"          | Calculating a fair split (equal or hours-weighted) from your daily cash totals, and showing you the breakdown before anything is recorded |
+| "I want to know if anyone's close to overtime before I finalize hours" | Summarizing scheduled hours per team member against the weekly overtime threshold                                                         |
+| "I don't want to double check every little schedule change"            | Making changes to a **draft** schedule only — nothing is visible to staff until you say "publish"                                         |
+| "How did today go, and what needs my attention?"                       | Summarizing sales, dayparts, leading items, labor versus sales, low stock, and operational exceptions from live Square data               |
+| "Which location needs attention this week?"                            | Comparing completed-order sales across your authorized locations                                                                          |
 
-1. Create a **dedicated single-tenant Entra resource application** and use [infra/entra-api-manifest.json](infra/entra-api-manifest.json) as the role/scope model. Replace every `REPLACE_WITH_*` value with a newly generated GUID or the application's actual client ID before applying it.
-2. Create a separate Entra client application for the Power Platform custom connector. Grant it delegated `mcp.tools` permission and preauthorize it under **Expose an API**. Assign the appropriate app role to each user or group.
-3. Store the App Service Authentication client secret as a Key Vault secret and pass its **Key Vault reference** to the `entraAuthSecretKeyVaultReference` Bicep parameter. Do not commit it.
-4. Deploy [infra/main.bicep](infra/main.bicep). It configures system-assigned managed identity, Key Vault RBAC, HTTPS-only App Service, `Return401`, protected-resource metadata, allowed connector client, and only two unauthenticated paths: `/healthz` and `/square/oauth/callback`.
-5. Register the exact `SquareOAuthRedirectUri` with the Square Developer Console. The application consumes both its MCP-issued connect link and Square callback state once; do not add `/square/oauth/start` to the Easy Auth exclusions.
-6. In Power Apps, import [connector/square-mcp.swagger.json](connector/square-mcp.swagger.json), replace its host/tenant/API values, enter the custom connector client ID and secret, and add the generated connector redirect URI to the connector client's Entra registration.
+## Getting connected
 
-Set `WEBSITE_AUTH_PRM_DEFAULT_WITH_SCOPES` to the exact exposed scope, such as `api://<api-client-id>/mcp.tools`. This lets MCP-capable clients discover authorization requirements. Configure App Service Authentication to allow the custom connector application's client ID as an allowed application.
+<details>
+<summary><strong>Step 1 — Add the connector in ChatGPT</strong></summary>
 
-## Operational requirements
+Ask your administrator or implementation contact for the connector link for your business. Adding it works the same way as adding any other ChatGPT app/connector.
 
-- Configure App Service Health Check to use `/healthz`.
-- Send App Service application logs to a retained Log Analytics workspace or Application Insights; alert on failed OAuth refreshes and failed mutation audit events.
-- Schedule `npm run refresh-square-tokens` daily with a managed-identity worker (for example, Azure Automation, a timer-triggered Function, or a Container Apps Job). The script refreshes connections due for renewal and returns a nonzero exit code on unexpected failures; alert on that signal.
-- Restrict Key Vault and App Service network access with private endpoints or approved IP/network rules appropriate to the environment.
-- Add automated tests for role enforcement, OAuth transaction consumption, Square-context resolution, and destructive-tool authorization before production release.
+</details>
+
+<details>
+<summary><strong>Step 2 — Sign in with your business identity</strong></summary>
+
+You'll be asked to sign in once with your organization's business account. This is how the assistant knows _which_ franchise location(s) you're authorized to see — no one else's data is ever visible to you, and yours is never visible to them.
+
+</details>
+
+<details>
+<summary><strong>Step 3 — Connect your Square account</strong></summary>
+
+The first time you ask for something that needs Square data, the assistant will notice you're not connected yet and give you a one-time link to connect your Square account. Click it, approve access in Square, and you're done — this only needs to happen once.
+
+You can also just ask: _"Am I connected to Square?"_
+
+</details>
+
+Once both steps are done, every tool below is available in any ChatGPT conversation.
+
+## What you can ask
+
+<details>
+<summary><strong>Scheduling</strong></summary>
+
+- "What shifts are scheduled at [location] next week?"
+- "How many hours does each person have scheduled this week, and is anyone close to overtime?"
+- "Draft a schedule for next week: [describe who works when]"
+- "Move Sarah's Thursday shift to start an hour later" _(on a draft schedule)_
+- "Publish this week's draft schedule"
+
+</details>
+
+<details>
+<summary><strong>Payroll & tips</strong></summary>
+
+- "Prep payroll for this pay period"
+- "Are there any timecard problems I should fix before running payroll?"
+- "Split $340 in cash tips for Saturday across the eligible team"
+- "Yes, approved — go ahead and record that" _(after reviewing a tip split)_
+
+</details>
+
+<details>
+<summary><strong>Timecards</strong></summary>
+
+- "Did anyone forget to clock out this week?"
+- "Show me any overlapping or double-punched shifts"
+
+</details>
+
+<details>
+<summary><strong>Sales, catalog & inventory</strong></summary>
+
+- "Give me a daily operator brief for the downtown location."
+- "Which hours and items drove sales yesterday?"
+- "Compare sales across my locations this week."
+- "What is low or out of stock at the airport location?"
+- "Are there catalog items missing variations or images?"
+- "How did labor compare to sales this pay period?"
+
+</details>
+
+## How approvals work
+
+Two kinds of requests behave differently, on purpose:
+
+- **Looking something up** (checking hours, finding timecard issues, previewing a tip split, drafting a schedule) happens immediately — nothing changes in Square yet.
+- **Actually changing something** (publishing a schedule so staff can see it, or recording a tip payout) always requires you to explicitly say "yes" or "approved" in the conversation first. The assistant will show you exactly what it's about to do before it does it.
+
+This means you can freely ask "what if" questions and review drafts without any risk — nothing is final until you say so.
+
+## Scheduled automations
+
+If your ChatGPT plan supports scheduled/recurring tasks, you can set one up like _"every Thursday evening, draft next week's schedule and prep payroll for review."_ The read-only and drafting steps will run automatically. Anything that requires your approval — publishing the schedule, recording a tip payout — will pause and wait for you to open the conversation and confirm, rather than happening unattended.
+
+## Data & privacy basics
+
+- Your business sign-in and your Square connection are tied together — only you (and anyone else your organization grants access to) can see your location's data.
+- Nothing you ask about is stored anywhere new; the assistant reads directly from your Square account each time and only writes back what you've explicitly approved. It does not keep a separate merchant-data warehouse, forecast, or alert history.
+- Scheduling preferences and rules you mention in conversation (who's available when, who can open, etc.) aren't remembered automatically between separate conversations — mention them again if you start a new chat, or keep using the same ongoing conversation/task for continuity.
+
+## FAQ
+
+<details>
+<summary><strong>Does this replace Square?</strong></summary>
+
+No. Square remains the system of record for your schedules, timecards, and payroll data. This assistant is a faster way to work with that same data conversationally.
+
+</details>
+
+<details>
+<summary><strong>Can it publish a schedule or pay out tips without me knowing?</strong></summary>
+
+No. Both of those are gated actions — they only happen after you've reviewed a preview/draft and explicitly approved it in the conversation.
+
+</details>
+
+<details>
+<summary><strong>What if I manage more than one location?</strong></summary>
+
+You can specify which of your authorized locations you mean by name in any request (e.g., "schedule at the downtown location"). You can only see and act on locations your Square connection is actually authorized for.
+
+</details>
+
+<details>
+<summary><strong>Who do I contact if something looks wrong?</strong></summary>
+
+Contact your implementation/administrator contact — they can review the underlying Square data and connection setup with you.
+
+</details>

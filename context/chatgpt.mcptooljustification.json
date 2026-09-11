@@ -1,0 +1,174 @@
+{
+  "tools": [
+    {
+      "name": "who_am_i",
+      "sourceFile": "src/tools/WhoAmITool.js",
+      "readOnly": true,
+      "readOnlyJustification": "Diagnostic tool - only resolves the connected Square merchant/locations via SquareContextResolver. Makes no Square write calls.",
+      "openWorld": true,
+      "openWorldJustification": "Depends on live data from the Square API, an external system outside the MCP server's own closed dataset.",
+      "destructive": false,
+      "destructiveJustification": "No data is created, modified, or removed - it only reports current connection state."
+    },
+    {
+      "name": "square_connect_account",
+      "sourceFile": "src/tools/SquareConnectAccountTool.js",
+      "readOnly": true,
+      "readOnlyJustification": "Either reads the existing Square connection state or returns a signed one-time link string; the tool call itself performs no Square or business-data writes.",
+      "openWorld": true,
+      "openWorldJustification": "Reflects live Square merchant-connection state from an external system.",
+      "destructive": false,
+      "destructiveJustification": "No data is changed or removed. The actual account-linking write happens later, out-of-band, via the user's browser OAuth flow, not this tool call."
+    },
+    {
+      "name": "search_scheduled_shifts",
+      "sourceFile": "src/tools/SearchScheduledShiftsTool.js",
+      "readOnly": true,
+      "readOnlyJustification": "Lists scheduled shifts via ScheduledShiftService.searchForPeriod only - explicitly documented as read-only.",
+      "openWorld": true,
+      "openWorldJustification": "Queries live schedule data from the external Square API.",
+      "destructive": false,
+      "destructiveJustification": "No writes are performed."
+    },
+    {
+      "name": "get_schedule_constraints",
+      "sourceFile": "src/tools/GetScheduleConstraintsTool.js",
+      "readOnly": true,
+      "readOnlyJustification": "Reads workweek configuration and scheduled hours only; documented as 'Read-only overtime-risk inputs'.",
+      "openWorld": true,
+      "openWorldJustification": "Pulls live workweek and scheduling data from the external Square API.",
+      "destructive": false,
+      "destructiveJustification": "No writes are performed."
+    },
+    {
+      "name": "get_timecard_exceptions",
+      "sourceFile": "src/tools/GetTimecardExceptionsTool.js",
+      "readOnly": true,
+      "readOnlyJustification": "Description states 'Read-only - never auto-corrects'; only searches and analyzes existing timecards.",
+      "openWorld": true,
+      "openWorldJustification": "Reads live Square timecard data from an external system.",
+      "destructive": false,
+      "destructiveJustification": "Detects issues but never modifies the underlying timecards."
+    },
+    {
+      "name": "prepare_payroll_reconciliation",
+      "sourceFile": "src/tools/PreparePayrollReconciliationTool.js",
+      "readOnly": true,
+      "readOnlyJustification": "Explicitly a 'Read-only payroll prep summary... Does not submit or finalize payroll'.",
+      "openWorld": true,
+      "openWorldJustification": "Summarizes live Square timecard state from an external system.",
+      "destructive": false,
+      "destructiveJustification": "Read-only aggregation with no side effects."
+    },
+    {
+      "name": "reconcile_cash_tips",
+      "sourceFile": "src/tools/ReconcileCashTipsTool.js",
+      "readOnly": true,
+      "readOnlyJustification": "'Preview only - makes no changes in Square'; only computes an allocation and signs a previewToken, with no Square write calls.",
+      "openWorld": true,
+      "openWorldJustification": "Reads live closed timecards from the external Square API to compute the proposed split.",
+      "destructive": false,
+      "destructiveJustification": "Nothing is committed; the write only happens later in commit_cash_tips after explicit owner approval."
+    },
+    {
+      "name": "create_draft_schedule",
+      "sourceFile": "src/tools/CreateDraftScheduleTool.js",
+      "readOnly": false,
+      "readOnlyJustification": "Calls client.labor.createScheduledShift, a Square write operation.",
+      "openWorld": true,
+      "openWorldJustification": "Creates data in the external Square system.",
+      "destructive": false,
+      "destructiveJustification": "Only adds new draft shifts not yet visible to staff; it never overwrites or removes existing shifts, and overlap/authorization checks are enforced first."
+    },
+    {
+      "name": "publish_schedule",
+      "sourceFile": "src/tools/PublishScheduleTool.js",
+      "readOnly": false,
+      "readOnlyJustification": "Calls client.labor.bulkPublishScheduledShifts, a Square write operation; description calls it 'the consequential step in scheduling'.",
+      "openWorld": true,
+      "openWorldJustification": "Changes state in the external Square system and triggers staff notifications.",
+      "destructive": false,
+      "destructiveJustification": "Transitions already-created draft shifts to published (a status/visibility change) without deleting or irreversibly overwriting shift data; requires explicit shift IDs and an approved_by value."
+    },
+    {
+      "name": "update_draft_shift",
+      "sourceFile": "src/tools/UpdateDraftShiftTool.js",
+      "readOnly": false,
+      "readOnlyJustification": "Calls client.labor.updateScheduledShift, a Square write operation.",
+      "openWorld": true,
+      "openWorldJustification": "Mutates draft shift data in the external Square system.",
+      "destructive": true,
+      "destructiveJustification": "Can update or delete (via is_deleted) a draft shift; passing is_deleted true removes the draft outright, and other fields overwrite prior values, causing potential data loss."
+    },
+    {
+      "name": "commit_cash_tips",
+      "sourceFile": "src/tools/CommitCashTipsTool.js",
+      "readOnly": false,
+      "readOnlyJustification": "Calls client.labor.updateTimecard to write the declared cash-tip amount back onto Square timecards.",
+      "openWorld": true,
+      "openWorldJustification": "Writes to live payroll data in the external Square system.",
+      "destructive": true,
+      "destructiveJustification": "Overwrites each timecard's declaredCashTipMoney, an irreversible payroll change - gated behind a signed, time-limited preview_token and an approved_by value."
+    },
+    {
+      "name": "get_location_sales_intelligence",
+      "sourceFile": "src/tools/GetLocationSalesIntelligenceTool.js",
+      "readOnly": true,
+      "readOnlyJustification": "Searches completed Square Orders and computes an in-memory response for the current tool call only.",
+      "openWorld": true,
+      "openWorldJustification": "Depends on live sales data in the external Square Orders API.",
+      "destructive": false,
+      "destructiveJustification": "Does not create, update, or delete orders or merchant data."
+    },
+    {
+      "name": "compare_location_sales",
+      "sourceFile": "src/tools/CompareLocationSalesTool.js",
+      "readOnly": true,
+      "readOnlyJustification": "Searches completed Square Orders for authorized locations and only aggregates the returned data.",
+      "openWorld": true,
+      "openWorldJustification": "Depends on live external Square Orders data.",
+      "destructive": false,
+      "destructiveJustification": "Makes no changes to any Square record."
+    },
+    {
+      "name": "get_catalog_readiness",
+      "sourceFile": "src/tools/GetCatalogReadinessTool.js",
+      "readOnly": true,
+      "readOnlyJustification": "Only calls Square Catalog Search and reports catalog-health gaps.",
+      "openWorld": true,
+      "openWorldJustification": "Queries the merchant's live Square catalog.",
+      "destructive": false,
+      "destructiveJustification": "Does not create, update, archive, or delete catalog objects."
+    },
+    {
+      "name": "get_inventory_stock_status",
+      "sourceFile": "src/tools/GetInventoryStockStatusTool.js",
+      "readOnly": true,
+      "readOnlyJustification": "Uses Square Catalog's stock-level query filter to report LOW and OUT items only.",
+      "openWorld": true,
+      "openWorldJustification": "Reads live Square catalog and inventory classification data.",
+      "destructive": false,
+      "destructiveJustification": "Does not adjust counts or make any inventory change."
+    },
+    {
+      "name": "get_labor_vs_sales",
+      "sourceFile": "src/tools/GetLaborVsSalesTool.js",
+      "readOnly": true,
+      "readOnlyJustification": "Searches existing Square timecards and completed orders, then computes an in-memory operational estimate.",
+      "openWorld": true,
+      "openWorldJustification": "Depends on live external Square Labor and Orders data.",
+      "destructive": false,
+      "destructiveJustification": "Does not alter timecards, orders, payroll, or any other Square data."
+    },
+    {
+      "name": "get_workforce_coverage",
+      "sourceFile": "src/tools/GetWorkforceCoverageTool.js",
+      "readOnly": true,
+      "readOnlyJustification": "Searches scheduled shifts and lists Square jobs to summarize existing coverage.",
+      "openWorld": true,
+      "openWorldJustification": "Uses live external Square Labor and Team API data.",
+      "destructive": false,
+      "destructiveJustification": "Does not change shifts, jobs, or team members."
+    }
+  ]
+}

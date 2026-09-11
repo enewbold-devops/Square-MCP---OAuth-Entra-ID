@@ -13,6 +13,9 @@ export class SquareOAuthService {
         'TIMECARDS_WRITE',
         'TIMECARDS_SETTINGS_READ',
         'TIMECARDS_SETTINGS_WRITE',
+        'ORDERS_READ',
+        'ITEMS_READ',
+        'INVENTORY_READ',
     ];
 
     #keyVaultService;
@@ -85,24 +88,5 @@ export class SquareOAuthService {
             refreshToken,
             grantType: 'refresh_token',
         });
-    }
-
-    async revokeToken(accessToken) {
-        const { applicationId, applicationSecret } = await this.getApplicationCredentials();
-        const environment = await this.#getEnvironmentName();
-        const revokeUrl =
-            environment === 'production' ? 'https://connect.squareup.com/oauth2/revoke' : 'https://connect.squareupsandbox.com/oauth2/revoke';
-
-        const response = await fetch(revokeUrl, {
-            method: 'POST',
-            headers: {
-                Authorization: `Client ${applicationSecret}`,
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({ client_id: applicationId, access_token: accessToken }),
-        });
-        if (!response.ok) {
-            throw new Error(`Square token revocation failed with HTTP ${response.status}.`);
-        }
     }
 }

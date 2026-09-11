@@ -1,8 +1,10 @@
 import { z } from 'zod';
+import { randomUUID } from 'node:crypto';
 import { McpTool } from './base/McpTool.js';
 import { ScheduledShiftService } from '../services/ScheduledShiftService.js';
 
 export class CreateDraftScheduleTool extends McpTool {
+    static MAX_DRAFT_SHIFTS_PER_CALL = 25;
     static toolName = 'create_draft_schedule';
     static description = 'Creates draft scheduled shifts (not visible to staff until published via publish_schedule). Validates location authorization and checks for overlaps with existing shifts per team member.';
     static inputSchema = z.object({
@@ -43,11 +45,23 @@ export class CreateDraftScheduleTool extends McpTool {
                 'shifts_json must be a JSON array of {"location_name":string,"job_id":string,"team_member_id":string|null,"start_at":string,"end_at":string,"notes":string|null}.'
             );
         }
+        if (!Array.isArray(shiftRequests) || shiftRequests.length === 0) {
+            throw new Error('shifts_json must contain at least one shift request.');
+        }
+        if (shiftRequests.length > CreateDraftScheduleTool.MAX_DRAFT_SHIFTS_PER_CALL) {
+            throw new Error(`A draft-schedule request can contain at most ${CreateDraftScheduleTool.MAX_DRAFT_SHIFTS_PER_CALL} shifts. Split this request into batches.`);
+        }
 
         const scheduledShiftService = new ScheduledShiftService(squareContext);
         const results = [];
         for (const request of shiftRequests) {
             try {
+                if (!request || typeof request !== 'object') {
+                    throw new Error('Each shift request must be an object.');
+                }
+                if (!request.location_name || !request.job_id || !request.start_at || !request.end_at) {
+                    throw new Error('Each shift requires location_name, job_id, start_at, and end_at.');
+                }
                 // Authorization and overlap checks are enforced here - never trusted from the model's input.
                 const location = squareContext.requireAuthorizedLocation(request.location_name);
 
@@ -72,6 +86,7 @@ export class CreateDraftScheduleTool extends McpTool {
                 }
 
                 const { scheduledShift } = await squareContext.client.labor.createScheduledShift({
+                    idempotencyKey: randomUUID(),
                     scheduledShift: {
                         draftShiftDetails: {
                             locationId: location.id,

@@ -43,6 +43,22 @@ export class ReconcileCashTipsTool extends McpTool {
         } catch {
             throw new Error('daily_cash_totals_json must be a JSON array of {"date":"YYYY-MM-DD","amount":number}.');
         }
+        if (!Array.isArray(dailyCashTotals) || dailyCashTotals.length === 0) {
+            throw new Error('daily_cash_totals_json must contain at least one daily total.');
+        }
+        const seenDates = new Set();
+        for (const entry of dailyCashTotals) {
+            if (!entry || typeof entry.date !== 'string' || !Number.isFinite(entry.amount) || entry.amount < 0) {
+                throw new Error('Each daily cash total must contain a YYYY-MM-DD date and a non-negative numeric amount.');
+            }
+            if (seenDates.has(entry.date)) {
+                throw new Error(`daily_cash_totals_json contains duplicate date "${entry.date}".`);
+            }
+            seenDates.add(entry.date);
+        }
+        if (!['equal_split', 'hours_weighted'].includes(args.allocation_method || 'equal_split')) {
+            throw new Error('allocation_method must be equal_split or hours_weighted.');
+        }
 
         const timecardService = new TimecardService(squareContext);
         const timecards = await timecardService.searchForPeriod({
@@ -64,6 +80,7 @@ export class ReconcileCashTipsTool extends McpTool {
             payPeriodStart: args.pay_period_start,
             payPeriodEnd: args.pay_period_end,
             allocations: result.allocations,
+            timecardVersions: Object.fromEntries(timecards.map((timecard) => [timecard.id, timecard.version])),
         });
 
         return { ...result, previewToken };

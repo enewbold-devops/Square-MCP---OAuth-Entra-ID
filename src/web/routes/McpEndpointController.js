@@ -1,23 +1,31 @@
 import { McpServer } from '@modelcontextprotocol/server';
 import { NodeStreamableHTTPServerTransport } from '@modelcontextprotocol/node';
+import { requireBearerAuth, getOAuthProtectedResourceMetadataUrl } from '@modelcontextprotocol/express';
 import { ToolRegistry } from '../../tools/base/ToolRegistry.js';
+import { OperationalResourceRegistry } from '../../mcp/OperationalResourceRegistry.js';
+import { OperationalPromptRegistry } from '../../mcp/OperationalPromptRegistry.js';
 
 // Stateless Streamable HTTP endpoint: a fresh transport per request, connected to the shared McpServer
-// instance (the SDK's own documented pattern for stateless hosting). Gated by the Easy Auth principal
-// middleware, which reads the identity Azure App Service Authentication already verified and attaches
-// it to req.auth - the transport forwards it through as ctx.http.authInfo for every tool call.
+// instance (the SDK's own documented pattern for stateless hosting). Gated by requireBearerAuth, which
+// validates the MCP access token this server's own OAuth broker issued and attaches the resulting
+// AuthInfo to req.auth - the transport forwards it through as ctx.http.authInfo for every tool call.
 export class McpEndpointController {
     #mcpServer;
-    #authMiddleware;
+    #bearerAuth;
 
-    constructor({ serverName, serverVersion, serverInstructions, tools, authMiddleware }) {
+    constructor({ serverName, serverVersion, serverInstructions, tools, tokenVerifier, resourceServerUrl }) {
         this.#mcpServer = new McpServer({ name: serverName, version: serverVersion, instructions: serverInstructions });
-        this.#authMiddleware = authMiddleware;
+        this.#bearerAuth = requireBearerAuth({
+            verifier: tokenVerifier,
+            resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(resourceServerUrl),
+        });
         ToolRegistry.registerAll(this.#mcpServer, tools);
+        OperationalResourceRegistry.registerAll(this.#mcpServer);
+        OperationalPromptRegistry.registerAll(this.#mcpServer);
     }
 
     registerRoutes(app) {
-        app.post('/mcp', this.#authMiddleware, (req, res) => this.#handle(req, res));
+        app.post('/mcp', this.#bearerAuth, (req, res) => this.#handle(req, res));
     }
 
     async #handle(req, res) {

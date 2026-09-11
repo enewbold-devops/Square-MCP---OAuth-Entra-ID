@@ -2,8 +2,11 @@ import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 
 const STATE_TTL_MS = 15 * 60 * 1000;
 
-// Signed and durable OAuth transactions: a HMAC protects integrity while Key Vault records and
-// consumes each nonce once. This prevents a leaked connect link or callback state from being reused.
+// Signed, stateless 'state'/link token: principalId.nonce.timestamp.hmac. Binds the token to the
+// enterprise principal that initiated it, so a Square-connect link minted for one franchise owner
+// can't be replayed to attach a different owner's Square account (the account-binding attack the
+// MCP third-party-auth guidance warns about). Used both as the one-time "Connect Square" link a tool
+// mints, and as the state param that round-trips through Square's OAuth callback.
 export class OAuthStateSigner {
     #keyVaultService;
     #signingKey = null;
@@ -23,38 +26,27 @@ export class OAuthStateSigner {
         return createHmac('sha256', key).update(payload).digest('hex');
     }
 
-    async create(principalId, purpose) {
-        if (!['connect-link', 'square-callback'].includes(purpose)) {
-            throw new Error('Invalid OAuth transaction purpose.');
-        }
+    async create(principalId) {
         const key = await this.#getSigningKey();
         const encodedPrincipalId = Buffer.from(principalId, 'utf-8').toString('base64url');
         const nonce = randomBytes(16).toString('hex');
         const timestamp = Date.now().toString();
-        const payload = `${purpose}.${encodedPrincipalId}.${nonce}.${timestamp}`;
-        await this.#keyVaultService.createOAuthTransaction(nonce, {
-            purpose,
-            principalId,
-            expiresAt: Date.now() + STATE_TTL_MS,
-        });
+        const payload = `${encodedPrincipalId}.${nonce}.${timestamp}`;
         return `${payload}.${this.#sign(payload, key)}`;
     }
 
-    // Atomically consumes the server-side transaction after validating the token signature, its
-    // purpose, expiry, and bound Entra principal. It returns the bound principal ID or null.
-    async consume(state, expectedPurpose) {
+    // Returns the bound principalId if the token is well-formed, signed with our key, and within
+    // TTL_MS; otherwise null.
+    async verify(state) {
         if (typeof state !== 'string') {
             return null;
         }
         const parts = state.split('.');
-        if (parts.length !== 5) {
+        if (parts.length !== 4) {
             return null;
         }
-        const [purpose, encodedPrincipalId, nonce, timestamp, signature] = parts;
-        if (purpose !== expectedPurpose) {
-            return null;
-        }
-        const payload = `${purpose}.${encodedPrincipalId}.${nonce}.${timestamp}`;
+        const [encodedPrincipalId, nonce, timestamp, signature] = parts;
+        const payload = `${encodedPrincipalId}.${nonce}.${timestamp}`;
         const key = await this.#getSigningKey();
         const expected = this.#sign(payload, key);
 
@@ -65,21 +57,14 @@ export class OAuthStateSigner {
         }
 
         const issuedAt = Number(timestamp);
-        if (!Number.isFinite(issuedAt) || Date.now() - issuedAt > STATE_TTL_MS || issuedAt > Date.now() + 30_000) {
+        if (!Number.isFinite(issuedAt) || Date.now() - issuedAt > STATE_TTL_MS) {
             return null;
         }
 
-        let principalId;
         try {
-            principalId = Buffer.from(encodedPrincipalId, 'base64url').toString('utf-8');
+            return Buffer.from(encodedPrincipalId, 'base64url').toString('utf-8');
         } catch {
             return null;
         }
-
-        // Do not convert Key Vault outages or authorization failures into an "invalid link". The
-        // caller must receive an operational error so monitoring can distinguish an attack from a
-        // dependency incident.
-        const consumed = await this.#keyVaultService.consumeOAuthTransaction(nonce);
-        return consumed ? principalId : null;
     }
 }

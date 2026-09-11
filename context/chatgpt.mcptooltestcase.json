@@ -1,0 +1,53 @@
+{
+  "testCases": [
+    {
+      "name": "Test Case 1",
+      "scenario": "Verify the connected Square account for a bakery owner (\"Who am I / what's connected\").",
+      "userPrompt": "Which Square account and locations is this assistant connected to right now?",
+      "toolTriggered": "who_am_i",
+      "expectedOutput": "The tool returns resolved: true along with the connected Square merchantId and the list of authorized locations (id and name) for the signed-in owner. If no Square account has been linked yet, it returns resolved: false with a reason explaining that account connection is required, and the assistant should suggest running square_connect_account next."
+    },
+    {
+      "name": "Test Case 2",
+      "scenario": "Find scheduled shifts for a specific pay period at one location (\"Research/find schedule\").",
+      "userPrompt": "Show me all scheduled shifts at the Downtown location for the pay period 2026-08-10 to 2026-08-23.",
+      "toolTriggered": "search_scheduled_shifts",
+      "expectedOutput": "The tool returns shiftCount and a shifts array, each entry including id, version, and draft/published shift details (start/end times, assigned team member) scoped to the Downtown location and the given date range. If the location name isn't authorized for this owner, the tool errors instead of silently returning unrelated data."
+    },
+    {
+      "name": "Test Case 3",
+      "scenario": "Detect payroll/timecard problems before running payroll (\"Find issues / audit timecards\").",
+      "userPrompt": "Are there any timecard problems - like missed clock-outs or overlapping shifts - for the pay period 2026-08-10 to 2026-08-23?",
+      "toolTriggered": "get_timecard_exceptions",
+      "expectedOutput": "The tool returns timecardCount and an exceptions array listing any detected issues (type such as MISSED_CLOCK_OUT, UNCLOSED_BREAK, OVERLAPPING_SHIFT, or MISSING_WAGE, plus the affected timecardId, teamMemberId, and a human-readable detail). The tool makes no changes - it only reports issues, matching its read-only annotation."
+    },
+    {
+      "name": "Test Case 4",
+      "scenario": "Split and approve cash tips end-to-end for a pay period (\"Reconcile then commit tips\") - a two-step preview/approve flow spanning two tools.",
+      "userPrompt": "We collected $180 in cash tips on 2026-08-15 and $140 on 2026-08-16 at the Downtown location for pay period 2026-08-10 to 2026-08-23. Split it evenly across the closed timecards, then commit it - I, Vicky Owner, approve.",
+      "toolTriggered": "reconcile_cash_tips followed by commit_cash_tips",
+      "expectedOutput": "reconcile_cash_tips first returns a preview: an allocations array (timecardId, teamMemberId, date, amount), an excluded array for any timecard that couldn't be allocated, a byDate summary, and a signed previewToken - no Square data is written yet. The assistant then calls commit_cash_tips with that previewToken and approved_by: \"Vicky Owner\", which writes declaredCashTipMoney back onto each allocated timecard and returns approvedBy, committedCount, and a per-timecard results array. If the previewToken is missing, expired, or doesn't match, commit_cash_tips errors instead of writing anything."
+    },
+    {
+      "name": "Test Case 5",
+      "scenario": "Build and publish a new week's schedule while checking overtime risk first (\"Check constraints, draft, then publish\") - a three-step create/verify/publish flow spanning multiple tools.",
+      "userPrompt": "Before scheduling next week (2026-08-24 to 2026-08-30) at the Downtown location, tell me who's already close to overtime, then add a draft shift for team member TM123 from 2026-08-24T09:00:00Z to 2026-08-24T17:00:00Z, and once it looks good publish it - approved by Vicky Owner.",
+      "toolTriggered": "get_schedule_constraints, then create_draft_schedule, then publish_schedule",
+      "expectedOutput": "get_schedule_constraints first returns scheduledHoursByTeamMember, the overtimeWeeklyHoursThreshold, and workweekConfig so the assistant can flag anyone near 40 hours before adding more shifts. create_draft_schedule then creates the new shift (rejecting it with an overlap error if TM123 already has a conflicting shift) and returns the new scheduledShiftId, invisible to staff until published. Finally publish_schedule is called with that scheduledShiftId and approved_by: \"Vicky Owner\", returning publishedCount and a per-shift results array confirming the shift is now visible to staff and notifications were sent."
+    },
+    {
+      "name": "Test Case 6",
+      "scenario": "Give a location owner a current-day operating brief with sales, labor, and inventory evidence.",
+      "userPrompt": "Give me a daily operator brief for Downtown today, including sales by hour, top items, labor versus sales, and any low stock.",
+      "toolTriggered": "get_location_sales_intelligence, get_labor_vs_sales, get_inventory_stock_status",
+      "expectedOutput": "The assistant identifies the precise Square location and RFC 3339 operating interval, reports completed-order facts from get_location_sales_intelligence, labels the labor calculation as an operational estimate, and reports LOW/OUT stock results. It does not invent forecasts or historical trends, and it calls out an inventory truncation note if one is returned."
+    },
+    {
+      "name": "Test Case 7",
+      "scenario": "Compare live completed-order sales across authorized locations before investigating a weak location.",
+      "userPrompt": "Which of my locations needs attention this week?",
+      "toolTriggered": "compare_location_sales followed by location-level intelligence tools as needed",
+      "expectedOutput": "The assistant uses compare_location_sales for an explicitly confirmed period, identifies material differences as observations rather than causes, and uses authorized location-specific read tools before making recommendations. The assistant does not perform any write action."
+    }
+  ]
+}
