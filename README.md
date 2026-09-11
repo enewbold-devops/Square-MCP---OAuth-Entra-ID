@@ -2,7 +2,7 @@
 
 ## Alan Newbold (AI Engine) | developer@e-newbold.com
 
-A ChatGPT-connected assistant that helps franchise owners and managers handle **scheduling, timecards, and payroll/tip reconciliation** for locations running on Square — without leaving a normal ChatGPT conversation.
+A ChatGPT-connected assistant that helps franchise owners and managers handle **scheduling, timecards, payroll/tip reconciliation, sales, catalog, and inventory intelligence** for locations running on Square — without leaving a normal ChatGPT conversation.
 
 This guide is written for franchise owners, managers, and operators. No technical background required. If you're the person setting this server up or maintaining it, see [TechnicalGuide.md](TechnicalGuide.md) instead.
 
@@ -39,6 +39,8 @@ Nothing about this replaces Square — it's a faster, conversational way to work
 | "Splitting cash tips fairly is a manual, error-prone process"          | Calculating a fair split (equal or hours-weighted) from your daily cash totals, and showing you the breakdown before anything is recorded |
 | "I want to know if anyone's close to overtime before I finalize hours" | Summarizing scheduled hours per team member against the weekly overtime threshold                                                         |
 | "I don't want to double check every little schedule change"            | Making changes to a **draft** schedule only — nothing is visible to staff until you say "publish"                                         |
+| "How did today go, and what needs my attention?"                       | Summarizing sales, dayparts, leading items, labor versus sales, low stock, and operational exceptions from live Square data               |
+| "Which location needs attention this week?"                            | Comparing completed-order sales across your authorized locations                                                                          |
 
 ## Getting connected
 
@@ -98,6 +100,18 @@ Once both steps are done, every tool below is available in any ChatGPT conversat
 
 </details>
 
+<details>
+<summary><strong>Sales, catalog & inventory</strong></summary>
+
+- "Give me a daily operator brief for the downtown location."
+- "Which hours and items drove sales yesterday?"
+- "Compare sales across my locations this week."
+- "What is low or out of stock at the airport location?"
+- "Are there catalog items missing variations or images?"
+- "How did labor compare to sales this pay period?"
+
+</details>
+
 ## How approvals work
 
 Two kinds of requests behave differently, on purpose:
@@ -114,7 +128,7 @@ If your ChatGPT plan supports scheduled/recurring tasks, you can set one up like
 ## Data & privacy basics
 
 - Your business sign-in and your Square connection are tied together — only you (and anyone else your organization grants access to) can see your location's data.
-- Nothing you ask about is stored anywhere new; the assistant reads directly from your Square account each time and only writes back what you've explicitly approved.
+- Nothing you ask about is stored anywhere new; the assistant reads directly from your Square account each time and only writes back what you've explicitly approved. It does not keep a separate merchant-data warehouse, forecast, or alert history.
 - Scheduling preferences and rules you mention in conversation (who's available when, who can open, etc.) aren't remembered automatically between separate conversations — mention them again if you start a new chat, or keep using the same ongoing conversation/task for continuity.
 
 ## FAQ

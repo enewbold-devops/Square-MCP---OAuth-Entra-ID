@@ -34,6 +34,7 @@ export class UpdateDraftShiftTool extends McpTool {
         const { scheduledShift: current } = await squareContext.client.labor.retrieveScheduledShift({
             id: args.scheduled_shift_id,
         });
+        squareContext.requireAuthorizedLocation(current.draftShiftDetails?.locationId ?? current.publishedShiftDetails?.locationId);
         const draft = { ...current.draftShiftDetails };
 
         if (args.job_id) {

@@ -1,0 +1,1610 @@
+ChatGPT Discussion Export
+==========================
+
+Topic:
+Enterprise ChatGPT Plugin / Node.js MCP Server on Azure App Service
+Microsoft Entra ID Authentication + Square OAuth Delegation
+
+Export Date:
+August 19, 2026
+
+Scope Note
+----------
+This export captures the user-visible prompts and assistant responses from the discussion, followed by a detailed narrative synthesis of the design and analysis. Private system instructions, developer instructions, hidden chain-of-thought, and internal tool activity are not included.
+
+======================================================================
+CONVERSATION TRANSCRIPT
+======================================================================
+
+USER
+----
+I am designing a custom NodeJs MCP server on Azure App Service to register as a enterprise plugin in ChatGPT. The Azure App Service has authentication into an Entra Enterprise App Registration for Easy Auth. ChatGPT requires Entra ID OAuth authorization server metadata must advertise PKCE support with code_challenge_methods_supported containing S256."
+
+ASSISTANT
+---------
+I’ll map the requirement to how Entra ID and App Service Easy Auth actually behave, then show the configuration pattern that works for a Node.js MCP server registered with ChatGPT.
+
+ASSISTANT
+---------
+The key issue is already visible: Microsoft Entra supports PKCE, but its live v2 discovery document does **not** currently advertise `code_challenge_methods_supported`. That means using Entra’s discovery metadata directly can fail ChatGPT’s MCP OAuth validation even though Entra itself can process PKCE.
+
+ASSISTANT
+---------
+Your existing Easy Auth setup is useful for protecting the MCP resource, but it does not control the OAuth discovery document ChatGPT validates. The clean solution is to separate **resource-server authentication** from the **authorization-server metadata** ChatGPT consumes.
+
+ASSISTANT
+---------
+Yes — you’ve hit a real interoperability gap between **Microsoft Entra ID** and the OAuth metadata requirements that ChatGPT currently applies to MCP plugins.
+
+OpenAI requires the authorization server discovered through MCP protected-resource metadata to explicitly publish:
+
+```json
+"code_challenge_methods_supported": ["S256"]
+```
+
+ChatGPT then performs authorization-code OAuth with PKCE/S256. OpenAI explicitly says an MCP authorization server is unsupported if that field is absent.
+
+The complication is that **Entra ID supports PKCE/S256**, but its current v2 OIDC discovery document does **not** advertise `code_challenge_methods_supported`. Microsoft documents that Entra supports both `plain` and `S256`, but the live discovery document at `login.microsoftonline.com/.../v2.0/.well-known/openid-configuration` does not contain that property.
+
+So this is not something you can fix by checking another box in the Entra App Registration.
+
+## What this means for your Azure App Service
+
+Azure App Service Easy Auth is acting primarily as the **resource-server authentication layer** for your MCP service. Microsoft now has preview support for publishing MCP Protected Resource Metadata by setting:
+
+```text
+WEBSITE_AUTH_PRM_DEFAULT_WITH_SCOPES
+```
+
+For example:
+
+```text
+WEBSITE_AUTH_PRM_DEFAULT_WITH_SCOPES=api://<MCP-APP-ID>/user_impersonation
+```
+
+App Service can then expose MCP protected-resource metadata and validate the bearer token presented to your MCP service. Microsoft also notes that Entra ID doesn't support DCR, so an MCP client normally needs a preconfigured client ID.
+
+The problem occurs one step later:
+
+```text
+ChatGPT
+   |
+   | GET /.well-known/oauth-protected-resource
+   v
+Your Azure App Service
+   |
+   | authorization_servers
+   v
+https://login.microsoftonline.com/<tenant>/v2.0
+   |
+   | GET /.well-known/openid-configuration
+   v
+Entra metadata
+   |
+   X  code_challenge_methods_supported missing
+```
+
+Easy Auth cannot alter the discovery document served from `login.microsoftonline.com`.
+
+## Architecture I would use
+
+For a production Enterprise MCP integration, I would separate the MCP resource server from the OAuth authorization server:
+
+1. **Keep your Node.js MCP server as the resource server.** It exposes `/mcp` and `/.well-known/oauth-protected-resource`.
+
+2. **Introduce an MCP-compatible authorization broker**, for example `https://auth.example.com`. Entra remains the upstream enterprise identity provider, so your users still authenticate with Entra, Conditional Access, MFA, tenant restrictions, etc.
+
+3. **Have the broker issue the MCP access token.** Its metadata explicitly advertises PKCE/S256, understands ChatGPT's `resource` parameter, validates PKCE, and issues a token whose audience is your MCP server.
+
+4. **Validate the broker token at the MCP service.** You can either validate that JWT in Node.js or configure App Service authentication to trust the broker as a custom OIDC provider. App Service Auth V2 supports custom OpenID Connect providers and also supports excluded paths when you need discovery/OAuth routes to remain anonymously reachable.
+
+The flow becomes:
+
+```text
+                 Entra ID
+                    ^
+                    | enterprise login
+                    |
+ChatGPT ---> MCP OAuth Broker
+   |             /authorize
+   |             /token
+   |             /.well-known/oauth-authorization-server
+   |                    |
+   |                    | MCP JWT
+   v                    v
+           Node.js MCP Server
+                /mcp
+```
+
+Your MCP protected-resource metadata would look roughly like:
+
+```js
+app.get("/.well-known/oauth-protected-resource", (req, res) => {
+  res.json({
+    resource: "https://mcp.example.com",
+    authorization_servers: [
+      "https://auth.example.com"
+    ],
+    scopes_supported: [
+      "mcp.read",
+      "mcp.write"
+    ]
+  });
+});
+```
+
+And the authorization broker would expose something similar to:
+
+```js
+app.get("/.well-known/oauth-authorization-server", (req, res) => {
+  res.json({
+    issuer: "https://auth.example.com",
+
+    authorization_endpoint:
+      "https://auth.example.com/oauth/authorize",
+
+    token_endpoint:
+      "https://auth.example.com/oauth/token",
+
+    jwks_uri:
+      "https://auth.example.com/.well-known/jwks.json",
+
+    response_types_supported: [
+      "code"
+    ],
+
+    grant_types_supported: [
+      "authorization_code",
+      "refresh_token"
+    ],
+
+    code_challenge_methods_supported: [
+      "S256"
+    ],
+
+    token_endpoint_auth_methods_supported: [
+      "none"
+    ],
+
+    authorization_response_iss_parameter_supported: true
+  });
+});
+```
+
+That metadata shape satisfies the important ChatGPT requirement. OpenAI also expects ChatGPT's `resource` parameter to be preserved through the authorization and token requests, with the resulting access token bound to that MCP resource, typically through its `aud` claim.
+
+Your broker's `/oauth/authorize` endpoint then needs to preserve:
+
+```text
+client_id
+redirect_uri
+state
+scope
+resource
+code_challenge
+code_challenge_method=S256
+```
+
+It sends the user through an upstream Entra login. After Entra authenticates the user, your broker creates its **own short-lived authorization code** associated with:
+
+```text
+Entra user identity
+ChatGPT client
+redirect_uri
+resource
+scopes
+code_challenge
+```
+
+Then ChatGPT calls:
+
+```http
+POST /oauth/token
+
+grant_type=authorization_code
+code=...
+redirect_uri=...
+client_id=...
+code_verifier=...
+resource=https://mcp.example.com
+```
+
+Your broker validates:
+
+```text
+BASE64URL(SHA256(code_verifier)) == stored code_challenge
+```
+
+and returns something conceptually like:
+
+```json
+{
+  "access_token": "<signed MCP JWT>",
+  "token_type": "Bearer",
+  "expires_in": 3600,
+  "scope": "mcp.read mcp.write"
+}
+```
+
+The JWT should be bound to the MCP service:
+
+```json
+{
+  "iss": "https://auth.example.com",
+  "aud": "https://mcp.example.com",
+  "sub": "<enterprise-user-id>",
+  "tid": "<entra-tenant-id>",
+  "scp": "mcp.read mcp.write",
+  "exp": 1780000000
+}
+```
+
+OpenAI specifically recommends checking signature, issuer, audience/resource, expiration, and scopes on every MCP request.
+
+### Why I would not simply patch Entra's metadata
+
+You could create a Node route that copies Microsoft's discovery JSON and inserts:
+
+```json
+"code_challenge_methods_supported": ["S256"]
+```
+
+That may get past an initial metadata validation check, but I would **not** use that as the enterprise architecture.
+
+The authorization-server `issuer`, protected-resource `authorization_servers`, authorization endpoint, token endpoint, `resource` handling, callback issuer identification, and issued access tokens are supposed to describe one coherent authorization server. OpenAI also checks issuer identification where advertised and expects `resource` to flow through OAuth. A metadata-only proxy can therefore fix the first error and expose you to a second interoperability problem later in the flow.
+
+One encouraging piece is that Microsoft is actively adding MCP-specific support to MSAL. The current MSAL Node documentation has an `isMcp: true` mode and explicit `resource` handling, so the Microsoft identity stack is clearly moving toward MCP-native OAuth behavior.
+
+For your specific stack, I would therefore target:
+
+```text
+ChatGPT Enterprise
+        |
+        | OAuth 2.1 + PKCE/S256
+        v
+MCP OAuth Broker (Node.js)
+        |
+        | OIDC
+        v
+Microsoft Entra ID
+        |
+        v
+MCP-specific JWT
+        |
+        v
+Azure App Service
+        |
+        v
+Node.js MCP Server
+```
+
+That lets you retain **Entra as the enterprise identity authority** without depending on Entra's discovery document satisfying ChatGPT's MCP-specific metadata validator.
+
+
+USER
+----
+The next goal  is that the Node.js MCP server expose tools created around the Square API to allow users in their agents to perform operations on their Square locations. They wil need to authenticate with their personal Square accounts in the ChatGPT agent session (these accounts are different from their Entra tenant identity)
+
+ASSISTANT
+---------
+That creates a **dual-identity architecture**: Entra proves who may use your enterprise MCP server, while Square separately proves which Square merchant/location that user may act on. I’ll map the session and token flow so those identities stay separate but securely correlated.
+
+ASSISTANT
+---------
+For Square, I would **not** make ChatGPT obtain or carry the Square token. Your MCP service should itself be the Square OAuth client, then keep the resulting seller token server-side and bind it to the already-authenticated enterprise principal. That matches MCP’s newer third-party authorization model and prevents Square credentials from entering the model/tool context.
+
+ASSISTANT
+---------
+Yes. This actually gives you a cleaner architecture, because **Entra identity and Square identity should be treated as two separate authentication domains**.
+
+The Entra identity answers:
+
+> “Is this person allowed to use our enterprise MCP server?”
+
+The Square authorization answers:
+
+> “Which Square merchant account has this person authorized our MCP service to operate on?”
+
+Those identities do **not** need to match.
+
+## Recommended architecture
+
+```text
+                           Enterprise identity
+                    ┌────────────────────────────┐
+                    │ Microsoft Entra ID         │
+                    │ employee@enterprise.com    │
+                    └─────────────┬──────────────┘
+                                  │
+                                  │ OAuth / MCP auth
+                                  ▼
+┌─────────────────┐        ┌───────────────────────────────┐
+│ ChatGPT Agent   │───────►│ Your Node.js MCP Server      │
+│                 │        │ Azure App Service            │
+│ MCP client      │        │                               │
+└─────────────────┘        │ Principal:                    │
+                           │   tid + oid                    │
+                           │                               │
+                           │ Square connection store        │
+                           │   Principal ──► Merchant(s)    │
+                           └──────────────┬────────────────┘
+                                          │
+                           separate OAuth │
+                                          ▼
+                           ┌───────────────────────────────┐
+                           │ Square OAuth                 │
+                           │                              │
+                           │ User signs into their        │
+                           │ personal Square account      │
+                           └──────────────┬────────────────┘
+                                          │
+                                          │ seller-scoped OAuth token
+                                          ▼
+                           ┌───────────────────────────────┐
+                           │ Square APIs                  │
+                           │                              │
+                           │ Merchants                    │
+                           │ Locations                    │
+                           │ Orders                       │
+                           │ Catalog                      │
+                           │ Customers                    │
+                           │ Payments                     │
+                           └───────────────────────────────┘
+```
+
+The critical point is that **ChatGPT should never receive the Square access token or refresh token**. Your MCP server becomes the OAuth client of Square and stores the resulting Square credentials itself. The MCP specification's URL-mode elicitation was explicitly designed for this exact scenario: an MCP server needing separate third-party OAuth authorization while the MCP client keeps using its existing MCP bearer token.
+
+---
+
+# 1. Authentication layer #1: ChatGPT → your MCP
+
+This remains the architecture we've been discussing.
+
+```text
+ChatGPT
+   |
+   | MCP OAuth token
+   v
+Your MCP server
+   |
+   +-- identifies enterprise employee
+```
+
+Once your MCP authorization layer validates the request, you derive an internal principal such as:
+
+```text
+principal_id =
+    <entra-tenant-id>:<entra-object-id>
+```
+
+I would use Entra's immutable `tid` + `oid` rather than email/UPN for this association. Microsoft specifically recommends the combination for storing application data associated with an organizational user; `sub` is pairwise to an application, while `oid` remains stable across applications within the tenant.
+
+For example:
+
+```json
+{
+  "principalId": "72f988bf-...:6d5d1a43-...",
+  "tenantId": "72f988bf-...",
+  "objectId": "6d5d1a43-...",
+  "displayName": "John Smith"
+}
+```
+
+Your Square integration never assumes that:
+
+```text
+john@enterprise.com
+```
+
+has any relationship to:
+
+```text
+john@gmail.com
+```
+
+used to sign in to Square.
+
+---
+
+# 2. Authentication layer #2: MCP server → Square
+
+When an MCP tool needs Square access:
+
+```text
+User:
+"Show me today's orders from my Arlington Square location."
+
+ChatGPT
+   |
+   | square_list_orders(...)
+   v
+MCP Server
+   |
+   | Who is calling?
+   |
+   +--> Entra principal = T1:U123
+   |
+   | Does T1:U123 have a Square connection?
+   |
+   +--> YES -> use stored Square OAuth grant
+   |
+   └--> NO  -> initiate Square account linking
+```
+
+Square's OAuth model is exactly appropriate for a multi-tenant system like this. Square says production applications serving multiple sellers should use OAuth seller-scoped tokens.
+
+Importantly, a Square OAuth token is associated with **one merchant**, not with an Entra user and not really with the Square login identity itself. Square describes the token as being scoped to a single merchant organization.
+
+That distinction becomes useful.
+
+One enterprise employee could potentially have:
+
+```text
+Entra employee
+    |
+    +--- Square Merchant A
+    |       +--- Location A1
+    |       +--- Location A2
+    |
+    +--- Square Merchant B
+            +--- Location B1
+            +--- Location B2
+            +--- Location B3
+```
+
+---
+
+# 3. Account linking should happen out-of-band
+
+The ideal experience is:
+
+```text
+User:
+"Show my Square locations."
+
+Agent calls:
+square_list_locations()
+
+MCP:
+No Square authorization exists.
+
+ChatGPT:
+"Connect your Square account to continue"
+
+       [ Connect Square ]
+
+             ↓
+
+https://mcp.yourcompany.com/connect/square/...
+
+             ↓
+
+Square Login
+             ↓
+Square Consent
+             ↓
+Your OAuth callback
+             ↓
+MCP token vault
+
+             ↓
+
+Agent retries square_list_locations()
+```
+
+This is exactly what MCP's **URL-mode elicitation** was created for. The MCP specification explicitly distinguishes:
+
+```text
+MCP authorization
+ChatGPT ───────────► MCP Server
+
+from
+
+third-party authorization
+MCP Server ────────► Square
+```
+
+and states that third-party credentials should stay with the MCP server rather than pass through the MCP client.
+
+### One implementation caveat
+
+The current OpenAI plugin documentation I found discusses MCP elicitation generally, but it does not explicitly document ChatGPT URL-mode elicitation support in the same level of detail as the MCP 2025-11-25 specification. OpenAI does say plugins should use MCP elicitation for additional user interaction and that secrets must not be collected through ordinary elicitation.
+
+Therefore I would make your server capability-aware:
+
+```ts
+const supportsUrlElicitation =
+  clientCapabilities?.elicitation?.url !== undefined;
+```
+
+If supported:
+
+```text
+elicitation/create
+mode = "url"
+```
+
+If not, fall back to a normal MCP tool result or optional plugin UI containing a short-lived **Connect Square** URL. That fallback is an implementation recommendation rather than a documented ChatGPT URL-elicitation guarantee.
+
+---
+
+# 4. Don't send users directly to Square from the elicitation URL
+
+There's an important security detail here.
+
+Don't return:
+
+```text
+https://connect.squareup.com/oauth2/authorize?...
+```
+
+directly.
+
+Instead return something like:
+
+```text
+https://mcp.contoso.com/square/connect/<random-one-time-id>
+```
+
+Then:
+
+```text
+ChatGPT
+     |
+     | user opens URL
+     v
+GET /square/connect/ABC123
+     |
+     | Verify enterprise user
+     | Verify ABC123 belongs to them
+     |
+     v
+302 Redirect
+     |
+     v
+Square OAuth
+```
+
+Why?
+
+Otherwise Alice could generate a Square authorization URL and convince Bob to open it, causing Bob's Square account to become attached to Alice's enterprise MCP identity.
+
+The MCP URL-elicitation specification explicitly calls out this phishing/account-binding attack and says the server must ensure that the user who initiated the authorization is the same user completing the external OAuth flow.
+
+So I would store:
+
+```ts
+interface SquareAuthorizationRequest {
+  id: string;
+  enterprisePrincipalId: string;
+
+  state: string;
+
+  requestedScopes: string[];
+
+  createdAt: Date;
+  expiresAt: Date;
+
+  used: boolean;
+}
+```
+
+with a very short lifetime.
+
+---
+
+# 5. Square OAuth flow
+
+Your MCP App Service is a **confidential Square OAuth client**.
+
+The basic Square sequence is:
+
+```text
+MCP server
+     |
+     | 302
+     v
+GET https://connect.squareup.com/oauth2/authorize
+     |
+     | User logs into Square
+     | User grants permissions
+     v
+Square
+     |
+     | code + state
+     v
+GET https://mcp.example.com/oauth/square/callback
+     |
+     | server-to-server exchange
+     v
+POST Square /oauth2/token
+     |
+     +--> access_token
+     +--> refresh_token
+     +--> merchant_id
+```
+
+Square documents this authorization-code flow and returns both an access token and refresh token after the server exchanges the authorization code.
+
+This Square OAuth exchange is entirely separate from the PKCE flow between ChatGPT and your MCP authorization server.
+
+In other words, you have:
+
+```text
+OAuth Flow A
+
+ChatGPT
+   |
+   | PKCE S256
+   v
+MCP Authorization Server
+```
+
+and independently:
+
+```text
+OAuth Flow B
+
+Your MCP server
+   |
+   | Square authorization code flow
+   v
+Square
+```
+
+Square also supports PKCE, but because your Node.js App Service is a confidential server-side client capable of protecting the Square application secret, the normal confidential-client code flow is appropriate. Square distinguishes confidential server clients from public applications and documents both flows.
+
+---
+
+# 6. Force Square account selection
+
+This is important for your use case.
+
+Some users will have access to more than one Square seller account.
+
+For production Square authorization, include:
+
+```text
+session=false
+```
+
+in the Square authorization URL.
+
+Square specifically recommends this so a seller with several Square accounts is forced to log in and choose the correct account instead of silently authorizing whichever Square session happens to exist in the browser.
+
+Conceptually:
+
+```ts
+const squareAuthorizationUrl =
+  "https://connect.squareup.com/oauth2/authorize" +
+  `?client_id=${SQUARE_APP_ID}` +
+  `&scope=${encodeURIComponent(scopes.join(" "))}` +
+  `&session=false` +
+  `&state=${state}`;
+```
+
+---
+
+# 7. Your database relationship
+
+I would model Square connections separately from enterprise users.
+
+Something approximately like:
+
+```text
+EnterprisePrincipal
+-------------------
+principal_id PK
+tenant_id
+object_id
+display_name
+
+
+SquareConnection
+----------------
+connection_id PK
+principal_id FK
+
+square_merchant_id
+merchant_display_name
+
+access_token_ciphertext
+refresh_token_ciphertext
+token_expires_at
+
+granted_scopes
+connection_status
+
+created_at
+updated_at
+last_refresh_at
+
+
+SquareLocation
+--------------
+connection_id FK
+location_id
+merchant_id
+
+name
+status
+timezone
+
+is_default
+last_synced_at
+```
+
+Critically:
+
+```text
+EnterprisePrincipal 1
+      |
+      | 1:N
+      v
+SquareConnection
+      |
+      | 1:N
+      v
+SquareLocation
+```
+
+instead of:
+
+```text
+EnterprisePrincipal 1:1 Square User
+```
+
+because that latter relationship does not reflect Square's authorization model.
+
+---
+
+# 8. Separate "connected merchant" from "active location"
+
+Once Square authorization succeeds, immediately call:
+
+```http
+GET /v2/locations
+```
+
+using the new seller access token.
+
+Square says this returns the locations associated with the seller identified by that token, and specifically recommends letting sellers choose and save a location for workflows that operate against locations. `ListLocations` requires `MERCHANT_PROFILE_READ`.
+
+Then your agent can have an interaction like:
+
+```text
+User:
+"Show my Square locations."
+
+Agent:
+square_list_locations()
+
+Result:
+
+1. Alexandria
+   location_id: L8892...
+
+2. Arlington
+   location_id: LK219...
+
+3. Washington DC
+   location_id: LM992...
+```
+
+And later:
+
+```text
+User:
+"Use Arlington."
+
+Agent:
+square_set_active_location({
+    location_id: "LK219..."
+})
+```
+
+You can maintain the selected location either persistently as a preference or only for the current workflow/session.
+
+---
+
+# 9. I would expose identity/account tools separately from business tools
+
+Your first MCP tool set could look like:
+
+```text
+square_connection_status
+square_connect_account
+square_disconnect_account
+
+square_list_accounts
+square_select_account
+
+square_list_locations
+square_get_location
+square_set_default_location
+```
+
+Then your actual Square operational tools:
+
+```text
+square_list_orders
+square_get_order
+square_create_order
+square_update_order
+
+square_search_customers
+square_get_customer
+square_create_customer
+
+square_search_catalog
+square_get_inventory
+
+square_list_payments
+square_get_payment
+
+...
+```
+
+The model should **never** see parameters like:
+
+```text
+access_token
+refresh_token
+Square client secret
+```
+
+OpenAI explicitly recommends not placing access tokens, auth secrets, or unnecessary sensitive data into MCP tool results.
+
+Instead:
+
+```ts
+server.registerTool(
+  "square_list_orders",
+  {
+    inputSchema: {
+      location_id: z.string(),
+      start_at: z.string().optional(),
+      end_at: z.string().optional()
+    }
+  },
+
+  async (args, context) => {
+
+    const principal = context.auth.principal;
+
+    const connection =
+      await squareConnections.forPrincipal(principal);
+
+    const token =
+      await squareTokenVault.getAccessToken(connection);
+
+    return squareClient.orders.search({
+      accessToken: token,
+      locationId: args.location_id,
+      ...
+    });
+  }
+);
+```
+
+The important security property is:
+
+```text
+tool arguments
+       ↓
+location_id
+
+NOT
+
+tool arguments
+       ↓
+square_access_token
+```
+
+---
+
+# 10. Token storage on Azure
+
+I would avoid storing raw tokens directly in App Service configuration.
+
+A good architecture is:
+
+```text
+Azure App Service
+       |
+       | Managed Identity
+       v
+Azure Key Vault
+       |
+       | encryption key
+       v
+Encrypted Square credentials
+       |
+       v
+Azure SQL / Cosmos DB / PostgreSQL
+```
+
+For static secrets such as:
+
+```text
+Square Application Secret
+Square Application ID
+JWT signing key
+```
+
+Key Vault is straightforward.
+
+For **per-user Square refresh tokens**, I would use envelope encryption:
+
+```text
+Square refresh token
+       |
+       | encrypt with data encryption key
+       v
+ciphertext
+       |
+       v
+database
+
+encryption key
+       |
+       v
+Azure Key Vault
+```
+
+That is much more scalable than creating one Key Vault secret for every connected Square merchant.
+
+Square itself says OAuth tokens should be encrypted and stored on a secure server rather than exposed to application clients.
+
+---
+
+# 11. Refreshing Square credentials
+
+Your token service should hide refresh behavior from the MCP tools.
+
+Something like:
+
+```ts
+async function getSquareAccessToken(connectionId: string) {
+
+  const connection =
+    await repository.get(connectionId);
+
+  if (needsRefresh(connection)) {
+    await refreshSquareToken(connection);
+  }
+
+  return decrypt(connection.accessToken);
+}
+```
+
+Square recommends refreshing OAuth access tokens well before expiration—currently recommending renewal every seven days or less for standard code-flow tokens—to surface problems before the token expires.
+
+So your tools don't care about refresh tokens at all:
+
+```text
+MCP tool
+   |
+   v
+SquareCredentialService
+   |
+   +--- valid token → return token internally
+   |
+   └--- stale token
+          |
+          v
+       Square OAuth refresh
+```
+
+---
+
+# 12. Write tools need a stronger safety boundary
+
+This becomes particularly important once you expose:
+
+```text
+create_payment
+refund_payment
+cancel_order
+update_inventory
+create_invoice
+...
+```
+
+OpenAI requires accurate MCP annotations; write actions are subject to confirmation behavior, and `destructiveHint` should be true where the operation is irreversible or difficult to reverse. `openWorldHint` applies when the tool affects an external system.
+
+For example:
+
+```ts
+annotations: {
+  readOnlyHint: false,
+  openWorldHint: true,
+  destructiveHint: true
+}
+```
+
+for a payment/refund-like operation.
+
+Where Square APIs support idempotency keys, generate and persist them on the MCP server. Square uses idempotency keys specifically to prevent duplicate operations such as duplicate payments or orders when a request is retried.
+
+That becomes especially important with agents, because model/tool retries should never accidentally become:
+
+```text
+"Create order"
+
+             ↓ retry
+
+"Create order again"
+```
+
+---
+
+# The resulting trust model
+
+You end up with three independent actors:
+
+```text
+┌─────────────────────────────────────────────┐
+│ Identity #1                                 │
+│                                             │
+│ Microsoft Entra                             │
+│ "Who is this employee?"                     │
+└─────────────────────┬───────────────────────┘
+                      │
+                      v
+┌─────────────────────────────────────────────┐
+│ Authorization layer                         │
+│                                             │
+│ Your MCP server                             │
+│ "What tools may this employee use?"         │
+└─────────────────────┬───────────────────────┘
+                      │
+                      v
+┌─────────────────────────────────────────────┐
+│ Identity / delegation #2                    │
+│                                             │
+│ Square OAuth                                │
+│ "Which Square merchant authorized access?"  │
+└─────────────────────┬───────────────────────┘
+                      │
+                      v
+┌─────────────────────────────────────────────┐
+│ Resource authorization                      │
+│                                             │
+│ Square                                      │
+│ Merchant → Locations → API resources        │
+└─────────────────────────────────────────────┘
+```
+
+And the mapping maintained by **your** service is:
+
+```text
+Entra:
+Tenant 123
+Employee ABC
+       │
+       │ authorized Square
+       ▼
+Square:
+Merchant M555
+       │
+       ├── Location L1
+       ├── Location L2
+       └── Location L3
+```
+
+That's the architecture I'd build.
+
+A particularly useful next design step is to define the **Node.js implementation for `square_connect_account` end-to-end**: MCP tool → URL elicitation → `/square/connect` → Square `/oauth2/authorize` → callback → encrypted token store → `ListLocations` → agent retries the original operation. That will establish the pattern every other Square tool can reuse.
+
+
+USER
+----
+lets export our disucssion and analysis to a detailed and narrative txt file. Make sure to capture all of the prompts and repsonses
+
+
+======================================================================
+NARRATIVE ANALYSIS AND DESIGN SYNTHESIS
+======================================================================
+
+1. Overall Goal
+---------------
+The project is an enterprise-grade Node.js Model Context Protocol (MCP) server hosted on Azure App Service and registered as an enterprise plugin in ChatGPT. The MCP server will expose tools that call the Square API so users can work with their own Square merchants and locations from an agent conversation.
+
+The system has two fundamentally different identity and authorization problems:
+
+1. Enterprise access:
+   Microsoft Entra ID determines whether the employee is permitted to access the MCP server at all.
+
+2. Third-party delegation:
+   Square OAuth determines which Square merchant account has delegated API authority to the MCP application.
+
+The design should not merge these identities. An employee's Entra identity and their Square login may use entirely different email addresses, accounts, organizations, and identity providers.
+
+2. Entra / ChatGPT OAuth Interoperability
+-----------------------------------------
+The first technical constraint is the OAuth authorization-server metadata expected by ChatGPT for MCP authentication.
+
+ChatGPT expects the authorization server used by the MCP resource to advertise PKCE support explicitly through:
+
+    "code_challenge_methods_supported": ["S256"]
+
+Microsoft Entra ID supports authorization-code PKCE and S256 in practice, but the relevant discovery metadata may not advertise the required field. As a result, using Entra's discovery document directly can fail ChatGPT's MCP OAuth validation even when the underlying Entra token endpoint understands PKCE correctly.
+
+Azure App Service Easy Auth does not solve this metadata mismatch. Easy Auth protects the App Service resource and validates tokens, but it does not control or modify Microsoft's authorization-server discovery document.
+
+The proposed architecture therefore separates the roles:
+
+- The Node.js MCP server remains the protected resource server.
+- A dedicated MCP-compatible OAuth authorization broker fronts Entra.
+- Entra remains the enterprise identity provider.
+- The broker exposes metadata that conforms to the OAuth/MCP expectations of ChatGPT, including PKCE S256.
+- The broker performs the user sign-in against Entra and then issues an MCP-specific access token for the MCP resource.
+- The MCP resource validates the token using issuer, audience/resource, expiration, signature, and scopes.
+
+This avoids relying on a metadata-only proxy that merely inserts one missing field into Microsoft's discovery document. The authorization server should be logically coherent: its issuer, authorization endpoint, token endpoint, resource handling, PKCE behavior, and issued tokens should all describe one authorization system.
+
+3. Enterprise Principal
+-----------------------
+Once the enterprise OAuth flow succeeds, the MCP server should derive a stable internal enterprise principal.
+
+A recommended form is:
+
+    principal_id = <entra-tenant-id>:<entra-object-id>
+
+Using the Entra tenant ID plus object ID avoids using mutable or human-readable values such as email address or UPN as the primary account-linking key.
+
+Conceptually:
+
+    EnterprisePrincipal
+        tenant_id
+        object_id
+        principal_id
+        display_name
+
+The principal represents "the enterprise person permitted to use this MCP integration."
+
+It does not represent their Square identity.
+
+4. Separate Square Authorization Domain
+---------------------------------------
+Square should be treated as an entirely separate authorization domain.
+
+The Entra authentication answers:
+
+    "May this enterprise user invoke this MCP server?"
+
+The Square authorization answers:
+
+    "Which Square merchant has delegated authority to this application?"
+
+The Square access and refresh tokens should never be provided to ChatGPT, placed in model-visible tool arguments, or returned in MCP tool results.
+
+Instead, the Node.js MCP server itself should be the Square OAuth client.
+
+The MCP server stores Square credentials securely and binds the resulting Square merchant connection to the enterprise principal.
+
+The mapping is therefore:
+
+    Entra Principal
+        |
+        +---- Square Merchant A
+        |         |
+        |         +---- Location A1
+        |         +---- Location A2
+        |
+        +---- Square Merchant B
+                  |
+                  +---- Location B1
+                  +---- Location B2
+
+This supports a one-to-many model in which one enterprise employee can connect multiple Square merchants.
+
+5. MCP Tool Invocation with Square
+----------------------------------
+When the agent invokes a Square-backed MCP tool, the server should follow a sequence like:
+
+    1. Validate the MCP bearer token.
+    2. Resolve the enterprise principal.
+    3. Resolve the selected Square connection for that principal.
+    4. Obtain a valid Square access token internally.
+    5. Refresh the token if required.
+    6. Call the appropriate Square API.
+    7. Return only the business result required by the tool.
+
+For example:
+
+    User:
+      "Show me today's orders from Arlington."
+
+    ChatGPT:
+      square_list_orders(location_id="...")
+
+    MCP:
+      identify principal
+      resolve Square merchant connection
+      fetch/decrypt/refresh Square token internally
+      call Square Orders API
+      return orders
+
+The tool schema should contain business arguments such as:
+
+    location_id
+    start_at
+    end_at
+    order_id
+    customer_id
+
+It should never contain:
+
+    access_token
+    refresh_token
+    client_secret
+
+6. Square Account Linking
+-------------------------
+If a user invokes a Square tool and no Square connection exists, the MCP server should initiate an account-linking experience.
+
+The preferred flow is:
+
+    User asks for a Square operation
+        |
+        v
+    MCP tool detects no linked Square merchant
+        |
+        v
+    Return a short-lived Connect Square URL
+        |
+        v
+    User opens URL
+        |
+        v
+    MCP server validates linking request
+        |
+        v
+    Redirect to Square OAuth
+        |
+        v
+    User signs into Square
+        |
+        v
+    User grants requested scopes
+        |
+        v
+    Square redirects to MCP callback
+        |
+        v
+    MCP server exchanges code for access/refresh tokens
+        |
+        v
+    Server stores encrypted merchant connection
+        |
+        v
+    Server calls ListLocations
+        |
+        v
+    Agent can retry or continue the requested operation
+
+MCP URL-mode elicitation is a natural protocol mechanism for this third-party account-linking pattern, where supported by the ChatGPT MCP client.
+
+A capability-aware implementation is advisable so the server can fall back to returning a safe short-lived link if URL-mode elicitation is unavailable.
+
+7. Preventing Account-Binding Attacks
+-------------------------------------
+The link returned to the user should not be a raw Square authorization URL.
+
+Instead of directly returning:
+
+    https://connect.squareup.com/oauth2/authorize?...
+
+the MCP service should issue a one-time application-owned URL such as:
+
+    https://mcp.example.com/square/connect/<one-time-id>
+
+The server should store a short-lived authorization-request record containing data such as:
+
+    request ID
+    enterprise principal ID
+    state value
+    requested scopes
+    creation time
+    expiry time
+    used flag
+
+When the user opens the link, the server verifies that the link is valid and associated with the correct enterprise principal before redirecting to Square.
+
+This reduces the risk of one user generating an authorization link and causing another person's Square account to become attached to the wrong enterprise principal.
+
+8. Square OAuth Model
+---------------------
+The Node.js MCP service is a confidential OAuth client from Square's perspective.
+
+The Square authorization sequence is separate from the MCP/ChatGPT PKCE flow.
+
+Flow A:
+
+    ChatGPT
+       |
+       | OAuth / PKCE S256
+       v
+    MCP Authorization Server
+       |
+       v
+    MCP resource token
+
+Flow B:
+
+    MCP Server
+       |
+       | Square OAuth authorization code flow
+       v
+    Square
+       |
+       v
+    Square seller access token + refresh token
+
+The Square application secret remains on the server.
+
+The server should use the Square authorization code flow, exchange the code server-to-server, and store the resulting merchant-scoped credentials.
+
+9. Merchant and Location Model
+------------------------------
+Square access tokens are effectively merchant scoped, so the persistence model should treat the merchant connection as a first-class entity.
+
+A possible conceptual model is:
+
+    EnterprisePrincipal
+    -------------------
+    principal_id
+    tenant_id
+    object_id
+    display_name
+
+    SquareConnection
+    ----------------
+    connection_id
+    principal_id
+    square_merchant_id
+    merchant_display_name
+    access_token_ciphertext
+    refresh_token_ciphertext
+    token_expires_at
+    granted_scopes
+    connection_status
+    created_at
+    updated_at
+    last_refresh_at
+
+    SquareLocation
+    --------------
+    connection_id
+    merchant_id
+    location_id
+    name
+    status
+    timezone
+    is_default
+    last_synced_at
+
+The important cardinality is:
+
+    EnterprisePrincipal 1:N SquareConnection
+    SquareConnection     1:N SquareLocation
+
+The system should not assume a one-to-one mapping between Entra users and Square users.
+
+10. Location Selection
+----------------------
+After a Square merchant is linked successfully, the service should call Square's Locations API to enumerate the merchant's available locations.
+
+A user may then select an active or default location.
+
+Example agent interaction:
+
+    User:
+      "Show my Square locations."
+
+    Agent:
+      square_list_locations()
+
+    Result:
+      Alexandria
+      Arlington
+      Washington DC
+
+    User:
+      "Use Arlington."
+
+    Agent:
+      square_set_active_location(...)
+
+The selected location can be:
+
+- session-scoped for a specific agent workflow, or
+- persisted as a preferred default.
+
+A useful design distinction is to keep "connected Square merchant" separate from "currently selected Square location."
+
+11. MCP Tool Taxonomy
+---------------------
+It is useful to separate connection and context-management tools from business-operation tools.
+
+Connection / identity tools:
+
+    square_connection_status
+    square_connect_account
+    square_disconnect_account
+    square_list_accounts
+    square_select_account
+    square_list_locations
+    square_get_location
+    square_set_default_location
+
+Business tools:
+
+    square_list_orders
+    square_get_order
+    square_create_order
+    square_update_order
+    square_search_customers
+    square_get_customer
+    square_create_customer
+    square_search_catalog
+    square_get_inventory
+    square_list_payments
+    square_get_payment
+
+This makes the lifecycle understandable to both the agent and the server.
+
+12. Secure Token Storage
+------------------------
+Square access and refresh tokens are user-specific third-party credentials.
+
+Static application secrets can be stored in Azure Key Vault, including:
+
+    Square application secret
+    Square application ID
+    MCP JWT signing material
+    encryption keys
+
+For potentially large numbers of per-user/per-merchant Square OAuth credentials, a scalable pattern is envelope encryption:
+
+    Square token
+        |
+        v
+    encrypt using a data-encryption mechanism
+        |
+        v
+    store ciphertext in database
+
+while the higher-level encryption key is protected by Azure Key Vault.
+
+The Azure App Service can use Managed Identity to access Key Vault and other Azure resources.
+
+This avoids storing thousands of user tokens as individual Key Vault secrets while still protecting the token material at rest.
+
+13. Token Refresh
+-----------------
+Token refresh should be abstracted behind a Square credential service.
+
+Business tools should never implement refresh logic independently.
+
+Conceptually:
+
+    getSquareAccessToken(connectionId)
+        |
+        +---- token valid
+        |       |
+        |       +---- decrypt and return internally
+        |
+        +---- token stale / near expiry
+                |
+                +---- refresh with Square
+                +---- persist rotated credentials
+                +---- return current access token
+
+This keeps authentication plumbing away from the MCP business tools and gives one place to implement locking, retry, rotation, revocation handling, and logging.
+
+14. Write Operations and Agent Safety
+-------------------------------------
+Square tools that mutate external state deserve stricter safeguards than read-only tools.
+
+Examples include:
+
+    create_payment
+    refund_payment
+    cancel_order
+    create_order
+    update_inventory
+    create_invoice
+
+MCP tool annotations should accurately indicate whether tools are:
+
+    read-only
+    open-world
+    destructive
+
+For side-effecting APIs that support idempotency keys, the MCP server should generate and persist idempotency keys where appropriate.
+
+This protects against accidental duplicate actions caused by network retries, tool retries, or agent retry behavior.
+
+For example, an agent retry must not turn:
+
+    "Create this order"
+
+into two actual Square orders.
+
+15. Final Trust Boundary
+------------------------
+The architecture ultimately has four layers of trust:
+
+    Microsoft Entra
+       "Who is the enterprise user?"
+
+            |
+            v
+
+    MCP Authorization Layer
+       "May this enterprise user invoke these MCP tools?"
+
+            |
+            v
+
+    Square OAuth Delegation
+       "Which Square merchant granted this app permission?"
+
+            |
+            v
+
+    Square Resource Authorization
+       "Which merchant resources, locations, and operations are allowed?"
+
+The Node.js MCP server is the trusted correlation point between these layers.
+
+It should know:
+
+    enterprise principal
+    connected Square merchant
+    active Square location
+    granted Square scopes
+    applicable MCP/tool permissions
+
+but it should never expose Square credential material to ChatGPT.
+
+16. Recommended Next Implementation Step
+----------------------------------------
+A strong next milestone is to implement the complete `square_connect_account` lifecycle before building a broad catalog of business tools.
+
+That implementation should cover:
+
+    MCP call
+      ->
+    detect no Square connection
+      ->
+    issue one-time connection request
+      ->
+    URL-mode elicitation or connection URL
+      ->
+    /square/connect
+      ->
+    Square authorization
+      ->
+    OAuth callback
+      ->
+    code exchange
+      ->
+    encrypted token persistence
+      ->
+    merchant lookup
+      ->
+    ListLocations
+      ->
+    connection complete
+      ->
+    original/next MCP operation succeeds
+
+Once this pattern is reliable, nearly every Square MCP tool can use a common authentication and merchant-context layer.
+
+======================================================================
+END OF EXPORT
+======================================================================

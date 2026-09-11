@@ -10,21 +10,25 @@ function base64UrlSha256(value) {
     return createHash('sha256').update(value).digest('base64url');
 }
 
-// The PKCE authorization server ChatGPT talks to: fronts Entra sign-in with metadata that satisfies
-// ChatGPT's MCP requirement (code_challenge_methods_supported: ["S256"]), which Entra's own discovery
-// document does not reliably advertise. Pending requests and issued codes are in-memory - fine for a
+// The authorization server ChatGPT and Power Platform talk to: fronts Entra sign-in with metadata
+// that satisfies ChatGPT's MCP requirement (code_challenge_methods_supported: ["S256"]), which
+// Entra's own discovery document does not reliably advertise. PKCE clients (ChatGPT) and confidential
+// clients that authenticate with a registered client_id/client_secret (Power Platform, which has no
+// PKCE support) are both accepted. Pending requests and issued codes are in-memory - fine for a
 // single-instance App Service, but won't survive a restart or scale-out (see plan follow-ups).
 export class OAuthBrokerController {
     #config;
     #entraOAuthService;
     #brokerTokenSigner;
+    #keyVaultService;
     #pendingRequests = new Map();
     #authorizationCodes = new Map();
 
-    constructor({ config, entraOAuthService, brokerTokenSigner }) {
+    constructor({ config, entraOAuthService, brokerTokenSigner, keyVaultService }) {
         this.#config = config;
         this.#entraOAuthService = entraOAuthService;
         this.#brokerTokenSigner = brokerTokenSigner;
+        this.#keyVaultService = keyVaultService;
     }
 
     get issuer() {
@@ -55,13 +59,14 @@ export class OAuthBrokerController {
         }
     }
 
-    // Entry point ChatGPT's MCP client redirects the user to - validates the PKCE params it must
-    // send, then hands off to Entra for the actual sign-in.
+    // Entry point ChatGPT's MCP client (and Power Platform's confidential client) redirects the user
+    // to - PKCE is validated when the caller supplies it, but isn't required, since not every OAuth
+    // client (Power Platform included) implements PKCE.
     async #authorize(req, res) {
         const { response_type: responseType, client_id: clientId, redirect_uri: redirectUri, state: clientState, code_challenge: codeChallenge, code_challenge_method: codeChallengeMethod, resource, scope } = req.query;
 
-        if (responseType !== 'code' || !clientId || !redirectUri || !codeChallenge || codeChallengeMethod !== 'S256') {
-            res.status(400).json({ error: 'invalid_request', error_description: 'response_type=code with a PKCE S256 code_challenge is required.' });
+        if (responseType !== 'code' || !clientId || !redirectUri || (codeChallenge && codeChallengeMethod !== 'S256')) {
+            res.status(400).json({ error: 'invalid_request', error_description: 'response_type=code is required; a code_challenge, if supplied, must use the S256 method.' });
             return;
         }
 
@@ -125,10 +130,11 @@ export class OAuthBrokerController {
         }
     }
 
-    // ChatGPT's token exchange - verifies the PKCE code_verifier against the stored challenge and
-    // issues the MCP access token, scoped to this MCP resource, never to Entra itself.
+    // Token exchange - authenticates the caller either via the original PKCE code_verifier (ChatGPT)
+    // or a registered client_id/client_secret (Power Platform), then issues the MCP access token,
+    // scoped to this MCP resource, never to Entra itself.
     async #token(req, res) {
-        const { grant_type: grantType, code, redirect_uri: redirectUri, code_verifier: codeVerifier } = req.body ?? {};
+        const { grant_type: grantType, code, redirect_uri: redirectUri, code_verifier: codeVerifier, client_id: clientId, client_secret: clientSecret } = req.body ?? {};
 
         if (grantType !== 'authorization_code') {
             res.status(400).json({ error: 'unsupported_grant_type' });
@@ -143,8 +149,12 @@ export class OAuthBrokerController {
             return;
         }
 
-        if (!codeVerifier || base64UrlSha256(codeVerifier) !== record.codeChallenge) {
-            res.status(400).json({ error: 'invalid_grant', error_description: 'code_verifier does not match the original code_challenge.' });
+        const clientAuthenticated = record.codeChallenge
+            ? Boolean(codeVerifier) && base64UrlSha256(codeVerifier) === record.codeChallenge
+            : await this.#verifyConfidentialClient(clientId, clientSecret);
+
+        if (!clientAuthenticated) {
+            res.status(400).json({ error: 'invalid_grant', error_description: 'Client authentication failed.' });
             return;
         }
 
@@ -178,5 +188,17 @@ export class OAuthBrokerController {
             console.error('Failed to load JWKS:', error.message);
             res.status(500).json({ error: 'server_error' });
         }
+    }
+
+    // Fixed confidential-client credentials for non-PKCE callers, provisioned ahead of time in Key Vault.
+    async #verifyConfidentialClient(clientId, clientSecret) {
+        if (!clientId || !clientSecret) {
+            return false;
+        }
+        const [expectedId, expectedSecret] = await Promise.all([
+            this.#keyVaultService.tryGetSecret('Entra-ClientId'),
+            this.#keyVaultService.tryGetSecret('Entra-ClientSecret'),
+        ]);
+        return Boolean(expectedId) && Boolean(expectedSecret) && clientId === expectedId && clientSecret === expectedSecret;
     }
 }

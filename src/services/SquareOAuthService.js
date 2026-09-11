@@ -13,6 +13,9 @@ export class SquareOAuthService {
         'TIMECARDS_WRITE',
         'TIMECARDS_SETTINGS_READ',
         'TIMECARDS_SETTINGS_WRITE',
+        'ORDERS_READ',
+        'ITEMS_READ',
+        'INVENTORY_READ',
     ];
 
     #keyVaultService;

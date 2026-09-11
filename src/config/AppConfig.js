@@ -20,13 +20,14 @@ export class AppConfig {
         if (env.WEBSITE_HOSTNAME) {
             return `https://${env.WEBSITE_HOSTNAME}`;
         }
-        return `http://localhost:${Number(env.PORT) || 3000}`;
+        return "https://squaremcp.e-newbold.com";
+       // return `http://localhost:${Number(env.PORT) || 3000}`;
     }
 
     // WEBSITE_HOSTNAME is auto-injected by Azure App Service (absent locally) - keeps the MCP
     // transport's Host-header allowlist in sync with wherever this app is actually reachable.
     #resolveAllowedHosts(env) {
-        const hosts = new Set(['localhost', '127.0.0.1', '[::1]']);
+        const hosts = new Set(['localhost', '127.0.0.1', '[::1]', 'squaremcp.e-newbold.com']);
         if (env.WEBSITE_HOSTNAME) {
             hosts.add(env.WEBSITE_HOSTNAME);
         }

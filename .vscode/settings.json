@@ -1,0 +1,8 @@
+{
+    "appService.zipIgnorePattern": [
+        "node_modules{,/**}",
+        ".vscode{,/**}"
+    ],
+    "appService.defaultWebAppToDeploy": "/subscriptions/ea09d523-b838-40d8-b5e3-421926233aad/resourceGroups/ETI_AppSvc/providers/Microsoft.Web/sites/enewbold-square-mcp",
+    "appService.deploySubpath": "."
+}

@@ -1,6 +1,8 @@
 // Pure domain logic for the payroll/tip reconciliation tool group, plus the Square Labor API calls
 // scoped to one resolved SquareContext - static methods never touch Square, only instance methods do.
 export class TimecardService {
+    static MAX_SEARCH_RESULTS = 1000;
+    static PAGE_SIZE = 200;
     #squareContext;
 
     constructor(squareContext) {
@@ -19,8 +21,24 @@ export class TimecardService {
             filter.status = status;
         }
 
-        const { timecards } = await this.#squareContext.client.labor.searchTimecards({ query: { filter }, limit: 200 });
-        return timecards ?? [];
+        const timecards = [];
+        let cursor;
+        do {
+            const page = await this.#squareContext.client.labor.searchTimecards({
+                query: { filter },
+                limit: TimecardService.PAGE_SIZE,
+                cursor,
+            });
+            timecards.push(...(page.timecards ?? []));
+            cursor = page.cursor;
+        } while (cursor && timecards.length < TimecardService.MAX_SEARCH_RESULTS);
+
+        if (cursor) {
+            throw new Error(
+                `Search exceeds the ${TimecardService.MAX_SEARCH_RESULTS}-timecard safety limit. Narrow the date range or location.`
+            );
+        }
+        return timecards;
     }
 
     static #hasUnclosedBreak(timecard) {

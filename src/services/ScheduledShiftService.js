@@ -4,6 +4,8 @@
 export class ScheduledShiftService {
     // US federal default only - not jurisdiction-aware.
     static OVERTIME_WEEKLY_HOURS_THRESHOLD = 40;
+    static MAX_SEARCH_RESULTS = 1000;
+    static PAGE_SIZE = 200;
 
     #squareContext;
 
@@ -29,13 +31,32 @@ export class ScheduledShiftService {
             filter.scheduledShiftStatuses = [scheduledShiftStatus];
         }
 
-        const { scheduledShifts } = await this.#squareContext.client.labor.searchScheduledShifts({ query: { filter }, limit: 200 });
-        return scheduledShifts ?? [];
+        const scheduledShifts = [];
+        let cursor;
+        do {
+            const page = await this.#squareContext.client.labor.searchScheduledShifts({
+                query: { filter },
+                limit: ScheduledShiftService.PAGE_SIZE,
+                cursor,
+            });
+            scheduledShifts.push(...(page.scheduledShifts ?? []));
+            cursor = page.cursor;
+        } while (cursor && scheduledShifts.length < ScheduledShiftService.MAX_SEARCH_RESULTS);
+
+        if (cursor) {
+            throw new Error(
+                `Search exceeds the ${ScheduledShiftService.MAX_SEARCH_RESULTS}-shift safety limit. Narrow the date range, location, or team member.`
+            );
+        }
+        return scheduledShifts;
     }
 
     // Assumes one workweek config per business - not verified against a seller with multiple locations.
     async getWorkweekConfig() {
-        const page = await this.#squareContext.client.labor.workweekConfigs.list();
+        const page = await this.#squareContext.client.labor.workweekConfigs.list({ limit: 2 });
+        if (page.data?.length > 1 || page.cursor) {
+            throw new Error('Multiple workweek configurations were returned; select a location-specific configuration before calculating overtime.');
+        }
         return page.data[0] ?? null;
     }
 

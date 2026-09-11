@@ -1,0 +1,412 @@
+Copilot Chat Discussion Export
+==============================
+
+Topic:
+Refactoring azapp-nodejs-mcp from a single-tenant, API-key-gated Square MCP server
+into an Entra ID + per-franchise-owner Square OAuth architecture, implementing it,
+and registering the result as an MCP connector in ChatGPT's developer console.
+
+Export Date:
+August 19, 2026
+
+Scope Note
+----------
+This export captures the user-visible prompts and assistant responses from the
+discussion, followed by a narrative synthesis of the design, the implementation
+that was actually carried out in the codebase, and the deployment/registration
+steps taken. Internal tool-call mechanics are summarized narratively rather than
+reproduced verbatim.
+
+======================================================================
+CONVERSATION TRANSCRIPT (SUMMARIZED)
+======================================================================
+
+USER
+----
+Attached a prior ChatGPT discussion (chatgpt_mcp_entra_square_architecture_discussion.txt)
+describing a conceptual Entra ID + Square OAuth architecture for an enterprise MCP
+plugin, and asked to analyze that conceptual architecture against the actual
+azapp-nodejs-mcp codebase.
+
+ASSISTANT
+---------
+Read the real implementation (AppConfig, AppServer, ApiKeyAuthService,
+SquareOAuthService, SquareOAuthController, McpEndpointController,
+SquareContextResolver, OAuthStateSigner) and found the codebase had diverged
+significantly from the conceptual document: it was a deliberately simplified,
+single-tenant server -  one shared `x-api-key` header instead of Entra ID, one
+fixed Key Vault secret (`square-oauth-primary`) instead of per-user Square
+connections, and no OAuth authorization-server metadata endpoints at all. Flagged
+that ChatGPT's MCP registration requires OAuth with
+`code_challenge_methods_supported: ["S256"]`, that Entra's own discovery document
+does not reliably advertise this, and that the existing API-key auth could not
+satisfy ChatGPT's OAuth requirement regardless. Raised the open question of
+whether the multi-tenant Entra+Square model was actually needed given the
+single-merchant deployment, or whether a narrower fix would do.
+
+USER
+----
+Confirmed the codebase should be refactored to Entra ID + per-franchise-owner
+personal Square connections, and asked to discuss the refactor architecture
+without writing code yet.
+
+ASSISTANT
+---------
+Read the remaining tools, SquareContext, McpTool, and ToolRegistry to understand
+how Square context currently flows into tool calls (no per-request principal
+anywhere - tools are singleton instances built once at startup, sharing one
+SquareContextResolver with no caller identity). Laid out the architecture
+discussion: three separate OAuth relationships (ChatGPT<->MCP broker,
+broker<->Entra, MCP server<->Square), the need for a stable enterprise principal
+(tid:oid) with no Key Vault-per-principal, no per-request principal plumbing, and
+open decisions to resolve: where the broker lives, per-principal storage model
+(Key Vault vs. DB), and 1:1 vs. 1:N owner-to-Square-merchant.
+
+USER
+----
+Answered the open decisions: (1) broker lives in the same App Service, (2)
+research the Square npm SDK and the MCP server npm SDK and recommend a strategy
+to persist franchise-owner (principal) context, (3) keep Key Vault secret-per-
+principal, (4) franchise owners have one Entra identity but a personal Square
+seller account with many merchant locations, (5) Square authentication has to be
+prompted from within the ChatGPT/MCP session - make a recommendation reconciling
+that with "two authentication channels," (6) make the overall recommendation.
+
+ASSISTANT
+---------
+Inspected node_modules for `@modelcontextprotocol/server`, `@modelcontextprotocol/
+express`, `@modelcontextprotocol/node`, and `square` directly (type definitions,
+not just docs) and found the MCP SDK already ships first-class OAuth Resource
+Server primitives: `requireBearerAuth`, the `OAuthTokenVerifier` interface
+(`verifyAccessToken(token): Promise<AuthInfo>`), `AuthInfo.extra` for custom
+claims, automatic propagation of `req.auth` into `ctx.http.authInfo` for every
+tool call, and `mcpAuthMetadataRouter`/`buildOAuthProtectedResourceMetadata` for
+serving RFC 8414/9728 discovery documents (exactly where
+`code_challenge_methods_supported: ["S256"]` belongs).
+
+Recommended: principal propagation via the SDK's existing `ctx.http.authInfo`
+mechanism (no new session store, no AsyncLocalStorage needed); a 1:1
+EnterprisePrincipal:SquareConnection model (not 1:N merchants) given one Entra
+identity maps to exactly one personal Square seller account with many locations
+- which the existing `SquareContext.authorizedLocations` already modeled
+correctly; Key Vault secret-per-principal named from `tid:oid`, no new database;
+and resolved the "two channels" tension by minting a short-lived,
+principal-bound, single-use link *during* an authenticated MCP tool call (reusing
+the existing HMAC-signed-token pattern from OAuthStateSigner/PreviewTokenSigner)
+rather than requiring a second independent Entra session for the browser-facing
+Square linking routes.
+
+USER
+----
+Asked to analyze and plan the full refactor for implementation.
+
+ASSISTANT
+---------
+Produced and saved a phased implementation plan (session memory): config &
+dependencies; broker (Entra leg + PKCE authorization server); bearer auth
+replacing the API key; principal propagation into every tool; per-principal
+Square storage & linking; cleanup. Listed every file to be touched, a
+verification checklist, and open follow-up considerations (Entra app
+registration is an Azure-side prerequisite; whether to keep ApiKeyAuthService as
+a dev fallback - decided no; dedicated `square_connect_account` tool vs.
+auto-trigger - decided dedicated tool).
+
+USER
+----
+"Start implementation."
+
+ASSISTANT
+---------
+Implemented the full plan end-to-end:
+
+  - Added the `jose` dependency for RS256 signing/verification and JWKS.
+  - Extended AppConfig with a derived `publicBaseUrl` (WEBSITE_HOSTNAME in Azure,
+    localhost:PORT locally) - no new required env vars.
+  - Added KeyVaultService.setSecret/tryGetSecret for generic string secrets.
+  - Created BrokerTokenSigner.js: the first asymmetric (RS256) signer in the
+    codebase, generating and persisting its own RSA keypair to Key Vault
+    (`Mcp-BrokerSigningKey`) on first use, exposing a JWKS document.
+  - Created EntraOAuthService.js: the broker's confidential-client leg to Entra
+    (plain fetch, no MSAL), reading `Entra-TenantId`/`Entra-ClientId`/
+    `Entra-ClientSecret` from Key Vault, verifying Entra's ID token via its
+    remote JWKS and extracting `tid`/`oid`/display name.
+  - Created McpTokenVerifier.js implementing the SDK's `OAuthTokenVerifier`,
+    validating the broker's own issued JWT and returning `AuthInfo` with
+    `extra: { tid, oid, displayName }`.
+  - Created OAuthBrokerController.js: `/oauth/authorize` (validates ChatGPT's
+    PKCE params, redirects to Entra), `/oauth/entra/callback` (exchanges Entra's
+    code, mints the broker's own single-use authorization code bound to the
+    original PKCE challenge), `/oauth/token` (verifies the PKCE code_verifier,
+    issues the MCP access token), and `/.well-known/jwks.json`. Pending requests
+    and issued codes are in-memory Maps (documented limitation: won't survive
+    restart/scale-out; only the `authorization_code` grant is implemented, no
+    refresh_token grant yet).
+  - Wired `mcpAuthMetadataRouter` in AppServer.js with
+    `code_challenge_methods_supported: ["S256"]` and the rest of the RFC 8414
+    fields.
+  - Replaced ApiKeyAuthService with `requireBearerAuth` in McpEndpointController
+    and deleted ApiKeyAuthService.js entirely.
+  - Threaded `ctx` through ToolRegistry -> McpTool.run(args, ctx) ->
+    src/tools/base/Principal.js (`resolvePrincipal(ctx)` reads
+    `ctx.http.authInfo.extra.{tid,oid,displayName}`) -> every concrete tool's
+    `handler(args, principal)`. Updated all 10 existing tools mechanically.
+  - Changed SquareContextResolver.resolve() to resolve(principalId), with Key
+    Vault secret names derived as `square-oauth-{tenantId}-{objectId}` instead
+    of one fixed secret.
+  - Extended OAuthStateSigner to bind a principalId into its signed payload
+    (used both as the one-time "Connect Square" link a tool mints and as the
+    Square OAuth `state` param), closing the account-binding gap where one
+    user's link could attach a different owner's Square account.
+  - Updated SquareOAuthController so `/square/oauth/start` requires that
+    principal-bound one-time link instead of being reachable anonymously.
+  - Added SquareConnectAccountTool.js (`square_connect_account`): checks for an
+    existing Square connection for the caller's principal, or mints and returns
+    a one-time connect link.
+  - Smoke-tested locally against a dummy Key Vault URI: OAuth metadata endpoints
+    served correct RFC 8414/9728 documents with S256 advertised; `/mcp` returned
+    401 without/with an invalid bearer token. During testing, found and fixed a
+    real bug: an unguarded async Express handler in OAuthBrokerController.
+    #authorize crashed the entire Node process on an uncaught Key Vault
+    rejection (a known Express-async-rejection pitfall) - added try/catch to
+    every handler in that controller and re-verified the process now survives
+    failures with clean 500 responses instead of exiting.
+  - Recorded architecture notes in repository memory and marked the session plan
+    complete.
+
+USER
+----
+"To deploy in azure app service what setting in the azure app service to
+configure?"
+
+ASSISTANT
+---------
+Listed required App Service Application Settings (KeyVaultUri,
+SquareOAuthRedirectUri; WEBSITE_HOSTNAME/PORT are auto-injected), platform
+settings (system-assigned Managed Identity; Key Vault RBAC role must be
+"Key Vault Secrets Officer" rather than read-only "Secrets User" because the app
+both reads and writes secrets; HTTPS Only; Always On; keep instance count at 1
+given the broker's in-memory OAuth state; Node 20+ runtime), the full list of
+Key Vault secrets to pre-provision (Square-Environment, Square-AppId,
+Square-AppSecret, Square-OAuthStateSigningKey, Square-TipPreviewSigningKey,
+Entra-TenantId, Entra-ClientId, Entra-ClientSecret; explicitly NOT
+Mcp-BrokerSigningKey, which the app generates itself), and related non-App-
+Service configuration (Entra app registration redirect URI, Square Developer
+Dashboard redirect URL).
+
+USER
+----
+Asked how to pre-provision Square-OAuthStateSigningKey and
+Square-TipPreviewSigningKey specifically.
+
+ASSISTANT
+---------
+Explained both are opaque HMAC keys (`createHmac('sha256', key)`), gave
+PowerShell/OpenSSL commands to generate 32-byte random values and az CLI /
+Az PowerShell commands to store them, and noted they must be distinct values
+from each other and are not auto-generated by the app (unlike the broker
+signing key).
+
+USER
+----
+Provided the real Key Vault URI (https://enewbold-keyvault-02.vault.azure.net)
+and asked to use the Azure CLI to generate and set these two secrets.
+
+ASSISTANT
+---------
+Found neither the Azure CLI nor the Az PowerShell module was installed on the
+machine; asked the user how they wanted to proceed. User chose to install the
+Az PowerShell module. Installed Az.Accounts/Az.KeyVault for the current user,
+signed in interactively via device-code authentication (Connect-AzAccount
+-UseDeviceAuthentication, since the plain interactive browser picker failed),
+confirmed the "Pay-As-You-Go" subscription context, generated two independent
+32-byte cryptographically random keys via
+`[System.Security.Cryptography.RandomNumberGenerator]::GetBytes(32)`, set them
+as `Square-OAuthStateSigningKey` and `Square-TipPreviewSigningKey` in
+enewbold-keyvault-02 via Set-AzKeyVaultSecret, and verified both secrets via
+Get-AzKeyVaultSecret.
+
+USER
+----
+Asked whether Mcp-BrokerSigningKey also needs to be pre-set.
+
+ASSISTANT
+---------
+No - BrokerTokenSigner.js calls tryGetSecret first and generates/persists its
+own RSA keypair automatically on first use. The only requirement is that the
+App Service's managed identity has write access to the vault (not just read),
+since this is the one secret the app creates itself.
+
+USER
+----
+"I am now ready to begin registration of the MCP server as a plugin in ChatGPT
+developer console."
+
+ASSISTANT
+---------
+Asked (since this is an external console the assistant cannot access directly)
+whether the app was already deployed and its hostname, and whether to lock down
+the broker's currently-unrestricted `redirect_uri` acceptance (an open-redirect
+gap, CWE-601) before registering. User confirmed it was deployed
+(https://enewbold-square-mcp-d8bvfkazg9h7hjdn.eastus-01.azurewebsites.net) and
+chose to defer the redirect_uri lockdown. Gave the exact values to enter in
+ChatGPT's console (MCP Server URL = .../mcp, Authentication = OAuth, scopes =
+"mcp.read mcp.write"), flagged that the broker implements no RFC 7591 Dynamic
+Client Registration endpoint so ChatGPT may need a manually-entered Client ID
+(any string - it isn't validated) with no Client Secret (public/PKCE-only
+client, `token_endpoint_auth_methods_supported: ["none"]"), and reiterated the
+deferred redirect_uri lockdown as an open item.
+
+USER
+----
+"There is another Domain Verification setting in ChatGPT when I register the
+plugin."
+
+ASSISTANT
+---------
+Asked what the verification step required. User reported ChatGPT wants a plain
+text file/response at
+https://.../.well-known/openai-apps-challenge containing the token
+`q-r49akVYddSSv594SmSj8mMj_v37EZNOr4VnON20KU`. Drafted the exact code to add
+(a hardcoded token constant plus a static Express route in AppServer.js), but
+file-editing and terminal tools were disabled for that turn, so the assistant
+gave the user the exact snippet to add manually instead of applying it.
+
+USER
+----
+"Make the edits."
+
+ASSISTANT
+---------
+With tools re-enabled, added the OPENAI_APPS_CHALLENGE_TOKEN constant and the
+`GET /.well-known/openai-apps-challenge` route (returning the token as plain
+text) to AppServer.js, confirmed no errors, started the server locally against
+a dummy Key Vault, and verified the route returned the exact token string
+before instructing the user to redeploy and re-verify the live URL.
+
+======================================================================
+NARRATIVE SYNTHESIS
+======================================================================
+
+1. Starting Point
+-----------------
+azapp-nodejs-mcp began this discussion as a deliberately simplified, single-
+tenant Square operations MCP server: a shared `x-api-key` header protected
+`/mcp`, and exactly one Square merchant connection was stored under a single
+fixed Key Vault secret (`square-oauth-primary`). This was a valid simplification
+of an earlier, more elaborate Entra+Square enterprise design captured in a prior
+export (chatgpt_mcp_entra_square_architecture_discussion.txt), but it could not
+satisfy two new requirements: registering as an enterprise plugin in ChatGPT
+(which requires real OAuth with PKCE/S256-capable authorization-server metadata)
+and supporting multiple franchise owners, each with their own personal Square
+seller account.
+
+2. The Core Architectural Decision
+-----------------------------------
+Rather than re-adopting the original transcript's full multi-tenant design
+wholesale, the actual business shape was clarified first: one Entra identity per
+franchise owner, and one personal Square seller account per owner containing
+many locations. That collapses the original design's
+`EnterprisePrincipal 1:N SquareConnection` model down to a much simpler
+`EnterprisePrincipal 1:1 SquareConnection`, with the existing
+`SquareContext.authorizedLocations` already correctly modeling the "many
+locations under one merchant" part. This one clarification avoided building an
+unnecessary relational connection/merchant-selection layer.
+
+3. Reusing the MCP SDK's Own OAuth Primitives
+----------------------------------------------
+Before writing any broker code, the actual `@modelcontextprotocol/server`,
+`@modelcontextprotocol/express`, and `@modelcontextprotocol/node` package type
+definitions were read directly rather than assumed. This surfaced that the SDK
+(v2) already ships a complete OAuth Resource Server toolkit: `requireBearerAuth`,
+the `OAuthTokenVerifier` contract, automatic `req.auth` -> `ctx.http.authInfo`
+propagation into every tool call, and `mcpAuthMetadataRouter` for RFC 8414/9728
+discovery documents. This meant the refactor's authentication plumbing was
+mostly wiring existing SDK capabilities correctly rather than inventing new
+mechanisms - notably, no AsyncLocalStorage or custom session store was needed to
+carry the caller's identity into tool handlers.
+
+4. The Broker
+-------------
+A small in-process OAuth authorization server ("broker") was added to the same
+App Service, fronting Entra ID because Entra's own OIDC discovery document does
+not reliably advertise `code_challenge_methods_supported`, which ChatGPT's MCP
+client requires. The broker performs a standard confidential-client code
+exchange against Entra, verifies the resulting ID token, and then issues its own
+RS256-signed MCP access token (the first asymmetric signer in this codebase -
+existing signers are HMAC because nothing external ever verified them). Pending
+authorization requests and issued codes are intentionally kept in-memory rather
+than in a database, a pragmatic simplification appropriate for a single-instance
+deployment, with the tradeoff explicitly documented (won't survive restarts or
+horizontal scale-out; no refresh_token grant yet).
+
+5. Principal Propagation and Per-Owner Square Storage
+-------------------------------------------------------
+The verified principal (`tenantId:objectId`) flows automatically through the
+SDK's existing `ctx.http.authInfo.extra`, is unwrapped once in a small shared
+`Principal.js` helper, and reaches every tool as a plain `principal` argument -
+keeping all auth-plumbing knowledge confined to `McpTool`/`ToolRegistry` rather
+than spread across ten business tools. `SquareContextResolver` moved from one
+global Key Vault secret to one secret per principal
+(`square-oauth-{tenantId}-{objectId}`), and the Square account-linking flow was
+changed so the one-time "Connect Square" link is only ever minted from inside an
+already-authenticated MCP tool call and is itself signed and bound to that
+principal - closing the account-binding attack path called out in the original
+architecture discussion, without requiring a second independent Entra session
+for the browser-facing linking routes.
+
+6. A Real Bug Caught During Testing
+-------------------------------------
+Local smoke-testing against a deliberately unreachable dummy Key Vault caught a
+genuine production-risk bug: an async Express route handler in
+`OAuthBrokerController` had no try/catch around a Key Vault call, and its
+rejection crashed the entire Node process rather than just failing that one
+request - a known pitfall with Express 4's lack of automatic async-rejection
+handling. Every handler in that controller was audited and wrapped, and the fix
+was re-verified by confirming the server now answers with clean 500 responses
+instead of exiting when Key Vault is unreachable.
+
+7. Deployment and Secret Provisioning
+----------------------------------------
+Moving from local development to a real Azure App Service surfaced a concrete
+configuration checklist: two required Application Settings (`KeyVaultUri`,
+`SquareOAuthRedirectUri`), a system-assigned Managed Identity with write (not
+just read) access to Key Vault (since the app both reads static secrets and
+writes the broker's generated signing key plus per-owner Square tokens), HTTPS
+Only, Always On, and a single-instance constraint tied directly to the broker's
+in-memory OAuth state. Two HMAC signing keys
+(`Square-OAuthStateSigningKey`, `Square-TipPreviewSigningKey`) had to be
+generated and pre-provisioned manually, which was carried out live against the
+user's real vault (enewbold-keyvault-02) after installing the Az PowerShell
+module and signing in via device-code authentication. `Mcp-BrokerSigningKey`,
+by contrast, does not need pre-provisioning - the app generates and persists it
+itself on first use.
+
+8. Registering with ChatGPT
+------------------------------
+Registering the deployed server as an MCP connector in ChatGPT's developer
+console introduced two items outside the codebase's control: the console's
+OAuth client configuration (resolved by noting the broker has no Dynamic Client
+Registration endpoint, so ChatGPT likely needs a manually-entered, unvalidated
+Client ID and no Client Secret, since the broker is a public PKCE-only client),
+and a domain-ownership "Domain Verification" challenge requiring a specific
+plain-text token to be served at a fixed `.well-known` path. The latter was
+implemented as a small hardcoded constant and a static Express route, smoke-
+tested locally to confirm the exact token string is returned, with redeployment
+and live re-verification left as the final step. The broker's current
+unrestricted acceptance of any `redirect_uri` (an open-redirect gap under
+CWE-601 / OAuth Security BCP RFC 9700) was surfaced explicitly and deliberately
+deferred at the user's request, to be revisited once ChatGPT's actual callback
+URL is known.
+
+9. Where Things Stand
+------------------------
+The refactor is implemented, locally smoke-tested, and deployed. Outstanding
+follow-ups, all previously flagged rather than silently skipped: add a
+refresh_token grant to the broker's token endpoint; lock `redirect_uri`
+validation down to ChatGPT's actual callback host once known; and confirm the
+domain-verification route is live on the deployed App Service before completing
+ChatGPT's registration flow.
+
+======================================================================
+END OF EXPORT
+======================================================================

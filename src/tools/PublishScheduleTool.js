@@ -3,6 +3,7 @@ import { McpTool } from './base/McpTool.js';
 import { ScheduledShiftService } from '../services/ScheduledShiftService.js';
 
 export class PublishScheduleTool extends McpTool {
+    static MAX_PUBLISH_BATCH_SIZE = 100;
     static toolName = 'publish_schedule';
     static description = 'Publishes draft scheduled shifts, making them visible to staff and triggering notifications. Requires explicit shift IDs and owner approval - this is the consequential step in scheduling.';
     static inputSchema = z.object({
@@ -36,11 +37,26 @@ export class PublishScheduleTool extends McpTool {
         if (!Array.isArray(shiftIds) || shiftIds.length === 0) {
             throw new Error('scheduled_shift_ids_json must contain at least one scheduled shift ID.');
         }
+        if (shiftIds.length > PublishScheduleTool.MAX_PUBLISH_BATCH_SIZE) {
+            throw new Error(`A publish request can contain at most ${PublishScheduleTool.MAX_PUBLISH_BATCH_SIZE} shifts. Split this request into batches.`);
+        }
+        if (!shiftIds.every((id) => typeof id === 'string' && id.length > 0)) {
+            throw new Error('scheduled_shift_ids_json must contain only non-empty shift ID strings.');
+        }
+        if (new Set(shiftIds).size !== shiftIds.length) {
+            throw new Error('scheduled_shift_ids_json must not contain duplicate shift IDs.');
+        }
+        const audience = args.notification_audience || 'AFFECTED';
+        if (!['ALL', 'AFFECTED', 'NONE'].includes(audience)) {
+            throw new Error('notification_audience must be ALL, AFFECTED, or NONE.');
+        }
 
         // Re-read fresh immediately before publishing - never reuse a version from an earlier search/read.
         const current = [];
         for (const id of shiftIds) {
             const { scheduledShift } = await squareContext.client.labor.retrieveScheduledShift({ id });
+            const details = scheduledShift.draftShiftDetails ?? scheduledShift.publishedShiftDetails;
+            squareContext.requireAuthorizedLocation(details?.locationId);
             current.push(scheduledShift);
         }
 
@@ -53,7 +69,7 @@ export class PublishScheduleTool extends McpTool {
 
         const { responses } = await squareContext.client.labor.bulkPublishScheduledShifts({
             scheduledShifts,
-            scheduledShiftNotificationAudience: args.notification_audience || 'AFFECTED',
+            scheduledShiftNotificationAudience: audience,
         });
 
         const results = Object.entries(responses ?? {}).map(([id, response]) => ({

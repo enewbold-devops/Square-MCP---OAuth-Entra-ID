@@ -21,6 +21,12 @@ import { GetScheduleConstraintsTool } from '../tools/GetScheduleConstraintsTool.
 import { CreateDraftScheduleTool } from '../tools/CreateDraftScheduleTool.js';
 import { UpdateDraftShiftTool } from '../tools/UpdateDraftShiftTool.js';
 import { PublishScheduleTool } from '../tools/PublishScheduleTool.js';
+import { GetLocationSalesIntelligenceTool } from '../tools/GetLocationSalesIntelligenceTool.js';
+import { CompareLocationSalesTool } from '../tools/CompareLocationSalesTool.js';
+import { GetCatalogReadinessTool } from '../tools/GetCatalogReadinessTool.js';
+import { GetInventoryStockStatusTool } from '../tools/GetInventoryStockStatusTool.js';
+import { GetLaborVsSalesTool } from '../tools/GetLaborVsSalesTool.js';
+import { GetWorkforceCoverageTool } from '../tools/GetWorkforceCoverageTool.js';
 
 import { McpEndpointController } from '../web/routes/McpEndpointController.js';
 import { SquareOAuthController } from '../web/routes/SquareOAuthController.js';
@@ -32,7 +38,7 @@ const SERVER_VERSION = '2.0.0';
 // carries no privileges, so hardcoding it here (rather than Key Vault) is fine.
 const OPENAI_APPS_CHALLENGE_TOKEN = 'q-r49akVYddSSv594SmSj8mMj_v37EZNOr4VnON20KU';
 const SERVER_INSTRUCTIONS =
-    'Square operations MCP server for franchise restaurants: payroll, tip reconciliation, timecards, scheduling, and workforce tools, scoped per connected franchise owner.';
+    'Square operations MCP server for franchise restaurants: live payroll, timecard, scheduling, sales, catalog, inventory, and workforce intelligence scoped per connected franchise owner. Read square://ops/operating-principles and square://ops/approval-policy when planning consequential work; live merchant data is available only through authenticated tools.';
 
 // Composition root: wires every service/tool once at startup and exposes the Express app.
 export class AppServer {
@@ -53,7 +59,7 @@ export class AppServer {
         const previewTokenSigner = new PreviewTokenSigner(keyVaultService);
         const squareContextResolver = new SquareContextResolver(keyVaultService, squareOAuthService);
 
-        const oauthBrokerController = new OAuthBrokerController({ config: this.#config, entraOAuthService, brokerTokenSigner });
+        const oauthBrokerController = new OAuthBrokerController({ config: this.#config, entraOAuthService, brokerTokenSigner, keyVaultService });
         const tokenVerifier = new McpTokenVerifier(brokerTokenSigner, {
             issuer: oauthBrokerController.issuer,
             audience: oauthBrokerController.mcpResourceUrl,
@@ -71,6 +77,12 @@ export class AppServer {
             new CreateDraftScheduleTool(squareContextResolver),
             new UpdateDraftShiftTool(squareContextResolver),
             new PublishScheduleTool(squareContextResolver),
+            new GetLocationSalesIntelligenceTool(squareContextResolver),
+            new CompareLocationSalesTool(squareContextResolver),
+            new GetCatalogReadinessTool(squareContextResolver),
+            new GetInventoryStockStatusTool(squareContextResolver),
+            new GetLaborVsSalesTool(squareContextResolver),
+            new GetWorkforceCoverageTool(squareContextResolver),
         ];
 
         // 'host: 0.0.0.0' disables createMcpExpressApp's built-in localhost-only default -
@@ -99,7 +111,7 @@ export class AppServer {
                     response_types_supported: ['code'],
                     grant_types_supported: ['authorization_code'],
                     code_challenge_methods_supported: ['S256'],
-                    token_endpoint_auth_methods_supported: ['none'],
+                    token_endpoint_auth_methods_supported: ['none', 'client_secret_post'],
                     scopes_supported: ['mcp.read', 'mcp.write'],
                 },
             })

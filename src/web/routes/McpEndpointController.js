@@ -2,6 +2,8 @@ import { McpServer } from '@modelcontextprotocol/server';
 import { NodeStreamableHTTPServerTransport } from '@modelcontextprotocol/node';
 import { requireBearerAuth, getOAuthProtectedResourceMetadataUrl } from '@modelcontextprotocol/express';
 import { ToolRegistry } from '../../tools/base/ToolRegistry.js';
+import { OperationalResourceRegistry } from '../../mcp/OperationalResourceRegistry.js';
+import { OperationalPromptRegistry } from '../../mcp/OperationalPromptRegistry.js';
 
 // Stateless Streamable HTTP endpoint: a fresh transport per request, connected to the shared McpServer
 // instance (the SDK's own documented pattern for stateless hosting). Gated by requireBearerAuth, which
@@ -18,6 +20,8 @@ export class McpEndpointController {
             resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(resourceServerUrl),
         });
         ToolRegistry.registerAll(this.#mcpServer, tools);
+        OperationalResourceRegistry.registerAll(this.#mcpServer);
+        OperationalPromptRegistry.registerAll(this.#mcpServer);
     }
 
     registerRoutes(app) {

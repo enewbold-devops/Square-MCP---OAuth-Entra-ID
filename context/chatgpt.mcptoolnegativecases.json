@@ -1,0 +1,19 @@
+{
+  "negativeTestCases": [
+    {
+      "name": "Negative Test Case 1",
+      "scenario": "General, off-topic conversation with no connection to bakery scheduling, timecards, tips, or Square account data - this MCP server should never trigger for unrelated small talk or world-knowledge questions.",
+      "userPrompt": "What's a good sourdough starter recipe, and what's the weather like today?"
+    },
+    {
+      "name": "Negative Test Case 2",
+      "scenario": "User references a different POS/payroll system that this server does not integrate with. The MCP only resolves data for the owner's linked Square account, so it should not trigger for Toast, Clover, ADP, Gusto, etc.",
+      "userPrompt": "Can you pull this week's schedule from our Toast POS and check the ADP payroll report for missing hours?"
+    },
+    {
+      "name": "Negative Test Case 3",
+      "scenario": "User asks to finalize a consequential, irreversible action (publishing a schedule or committing declared cash tips) with no prior context, dates, shift IDs, preview token, or approver - required inputs are missing, so the app should not call publish_schedule or commit_cash_tips and should instead ask for the missing details.",
+      "userPrompt": "Just go ahead and publish the schedule and finalize the cash tips for this pay period."
+    }
+  ]
+}

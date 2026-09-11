@@ -2,7 +2,7 @@
 
 ## Alan Newbold (AI Engine) | developer@e-newbold.com
 
-A self-hosted Node.js/Express [MCP](https://modelcontextprotocol.io) server, designed to run on Azure App Service, that exposes Square Labor operations (scheduling, timecards, payroll/tip reconciliation) as ChatGPT-consumable tools for franchise restaurant operators.
+A self-hosted Node.js/Express [MCP](https://modelcontextprotocol.io) server, designed to run on Azure App Service, that exposes Square Labor and read-only operational intelligence (sales, catalog, inventory, and workforce coverage) as ChatGPT-consumable tools for franchise restaurant operators.
 
 This guide covers **adopting and integrating** this server as a ChatGPT connector/App and understanding its tool catalog, identity model, and security posture. It does not cover Azure deployment/infrastructure setup. For the non-technical, owner-facing guide, see [ReadMe.md](ReadMe.md).
 
@@ -11,6 +11,7 @@ This guide covers **adopting and integrating** this server as a ChatGPT connecto
 - [Architecture overview](#architecture-overview)
 - [Identity chain](#identity-chain)
 - [Tool catalog reference](#tool-catalog-reference)
+- [Resources and prompts](#resources-and-prompts)
 - [ChatGPT connector integration](#chatgpt-connector-integration)
 - [Security model summary](#security-model-summary)
 - [Known limitations](#known-limitations)
@@ -26,7 +27,9 @@ flowchart TD
     ChatGPT["ChatGPT MCP Client"] -->|"1. PKCE authorize"| Broker["OAuthBrokerController\n(/oauth/authorize, /oauth/token)"]
     Broker -->|"2. delegates sign-in"| Entra["EntraOAuthService\n(enterprise identity)"]
     ChatGPT -->|"3. POST /mcp\nBearer: broker-issued JWT"| McpEP["McpEndpointController"]
-    McpEP --> Tools["11 McpTool instances"]
+    McpEP --> Tools["17 McpTool instances"]
+    McpEP --> Resources["4 static operating resources"]
+    McpEP --> Prompts["4 operational prompts"]
     Tools --> Resolver["SquareContextResolver"]
     Resolver -->|"per-owner token"| KV[("Azure Key Vault")]
     Resolver --> SquareSDK["Square SDK client\n(scoped to caller's access token)"]
@@ -64,13 +67,34 @@ Every tool call resolves its own `SquareContext` from the caller's principal —
 | `create_draft_schedule`          | write (draft only)              | `labor.searchScheduledShifts` (overlap check) + `labor.createScheduledShift` | `TIMECARDS_READ`, `TIMECARDS_WRITE`         |
 | `update_draft_shift`             | write (draft only), destructive | `labor.retrieveScheduledShift` + `labor.updateScheduledShift`                | `TIMECARDS_WRITE`                           |
 | `publish_schedule`               | **write, gated**                | `labor.retrieveScheduledShift` + `labor.bulkPublishScheduledShifts`          | `TIMECARDS_WRITE`                           |
+| `get_location_sales_intelligence`| read-only                       | `orders.search`                                                               | `ORDERS_READ`                               |
+| `compare_location_sales`         | read-only                       | `orders.search`                                                               | `ORDERS_READ`                               |
+| `get_catalog_readiness`          | read-only                       | `catalog.searchItems`                                                         | `ITEMS_READ`                                |
+| `get_inventory_stock_status`     | read-only                       | `catalog.searchItems` with Square stock-level filter                          | `ITEMS_READ`, `INVENTORY_READ`              |
+| `get_labor_vs_sales`             | read-only                       | `labor.searchTimecards` + `orders.search`                                    | `TIMECARDS_READ`, `ORDERS_READ`             |
+| `get_workforce_coverage`         | read-only                       | `labor.searchScheduledShifts` + `team.listJobs`                              | `TIMECARDS_READ`, `EMPLOYEES_READ`          |
 
-Scopes above are validated against Square's live Labor API reference (`Permissions:` field per endpoint). `SquareOAuthService.SQUARE_OAUTH_SCOPES` ([SquareOAuthService.js](src/services/SquareOAuthService.js)) requests a superset — including `EMPLOYEES_READ` and `TIMECARDS_SETTINGS_WRITE` — which are currently unused by any tool (see [Known limitations](#known-limitations)).
+New read scopes (`ORDERS_READ`, `ITEMS_READ`, and `INVENTORY_READ`) are requested by `SquareOAuthService.SQUARE_OAUTH_SCOPES` ([SquareOAuthService.js](src/services/SquareOAuthService.js)). Existing connections must complete Square OAuth again to grant them before the corresponding intelligence tools can run.
 
 Two tools implement **gated writes**:
 
 - `commit_cash_tips` requires a `preview_token` minted by a prior `reconcile_cash_tips` call ([PreviewTokenSigner.js](src/services/PreviewTokenSigner.js)) — it can only commit an allocation that was actually computed by the server, never one asserted fresh by the model.
 - `publish_schedule` and `commit_cash_tips` both re-read the current Square record (`version`/timecard state) immediately before writing, to satisfy Square's optimistic-concurrency requirement and avoid acting on stale data.
+
+## Operational safety limits
+
+- Timecard and scheduled-shift searches follow Square pagination, but stop with an explicit error after 1,000 records. Narrow the date range, location, or team member rather than accepting an incomplete result.
+- `create_draft_schedule` accepts at most 25 shifts per invocation and supplies a unique Square idempotency key for each create request.
+- `publish_schedule` accepts 1–100 distinct shift IDs, validates the requested notification audience, and retains Square's two-week bulk-publish window requirement.
+- `commit_cash_tips` accepts at most 50 approved timecards per invocation and processes them serially. Its signed preview is bound to the caller, merchant, location, and version of every previewed timecard; any change requires a fresh preview.
+- Sales intelligence accepts a maximum 31-day RFC 3339 period and stops rather than returning a partial result if Square reports more than 1,000 completed orders.
+- Catalog readiness stops at 1,000 matching items. Inventory stock status returns the caller-selected maximum per `LOW`/`OUT` classification and marks the response when Square has more matches.
+
+## Resources and prompts
+
+The server exposes static, version-controlled MCP resources: `square://ops/metric-definitions`, `square://ops/approval-policy`, `square://ops/operating-principles`, and `square://ops/capabilities`. They define how agents should interpret tools, but never contain merchant data.
+
+It also exposes four workflow prompts: `daily_operator_brief`, `weekly_franchise_review`, `schedule_build_review`, and `payroll_close_review`. Prompts guide a client through evidence gathering and approval gates; every live value remains an authenticated Square tool response.
 
 ## ChatGPT connector integration
 
@@ -97,8 +121,9 @@ Two tools implement **gated writes**:
 - **In-memory OAuth broker state** — `OAuthBrokerController`'s pending-request and authorization-code maps are process-local. Fine for a single instance; a restart or scale-out to multiple instances can drop in-flight sign-ins.
 - **Hardcoded overtime threshold** — `ScheduledShiftService.OVERTIME_WEEKLY_HOURS_THRESHOLD = 40` is a US-federal default, not jurisdiction-aware.
 - **No persisted scheduling "Rulebook"** — employee availability/preferences are handled conversationally only; there's no server-side store, so constraints don't carry over between separate ChatGPT conversations (a single ongoing scheduled task's thread is the closest approximation today).
-- **Over-scoped OAuth request** — `EMPLOYEES_READ` and `TIMECARDS_SETTINGS_WRITE` are requested in `SQUARE_OAUTH_SCOPES` but no current tool exercises them (no `teamMembers`/`team.listJobs` calls, no workweek-config writes) — candidates for either trimming or building out the corresponding tools.
-- **`workweekConfigs.list()` assumption** — `get_schedule_constraints` takes `page.data[0]`, assuming one workweek config per business; unverified against a multi-location seller with distinct configs.
+- **OAuth reconnection after an upgrade** — sellers who connected before the operational-intelligence scopes were added must reconnect Square to grant `ORDERS_READ`, `ITEMS_READ`, and `INVENTORY_READ`.
+- **No persisted operational history** — intentionally. The server does not ingest webhooks or retain merchant facts, so it cannot establish durable trend baselines, issue proactive alerts, or generate forecasts. Agents can compare explicitly requested live periods within one session.
+- **Multiple workweek configurations** — `get_schedule_constraints` deliberately stops rather than choosing arbitrarily if Square returns more than one workweek configuration. A future location-aware selection policy is needed before supporting that topology.
 - **Scheduling endpoints are Beta** — Square's `ScheduledShift` family (create/update/publish/search) is marked Beta in Square's own API reference.
 
 ## Extending the server
@@ -109,6 +134,8 @@ New tools follow a consistent pattern:
 2. Declare `static toolName`, `description`, `inputSchema`/`outputSchema` (Zod), and `annotations` (`readOnlyHint`/`destructiveHint`/`idempotentHint`) on the class.
 3. Resolve a `SquareContext` via the injected `SquareContextResolver`, then call the relevant Square SDK client scoped to that context.
 4. Register the new instance in the `tools` array in [AppServer.js](src/server/AppServer.js) — `ToolRegistry.registerAll` ([base/ToolRegistry.js](src/tools/base/ToolRegistry.js)) handles wiring it into the shared `McpServer`.
+
+Static agent guidance belongs in `src/mcp/OperationalResourceRegistry.js`; reusable workflow starters belong in `src/mcp/OperationalPromptRegistry.js`. Do not put merchant facts into either registry: live account data must stay behind an authenticated tool call.
 
 For any tool that writes data, follow the existing gated-write pattern: re-read current state immediately before writing, and require an explicit approval/preview mechanism for consequential actions rather than trusting the model to sequence steps correctly on its own.
 

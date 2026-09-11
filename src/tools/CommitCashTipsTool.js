@@ -6,6 +6,7 @@ function toMoneyAmount(dollars) {
 }
 
 export class CommitCashTipsTool extends McpTool {
+    static MAX_TIP_COMMITS_PER_CALL = 50;
     static toolName = 'commit_cash_tips';
     static description = 'Writes an owner-approved cash-tip allocation (from a prior reconcile_cash_tips preview) back to Square timecards. Requires a valid, unexpired preview_token.';
     static inputSchema = z.object({
@@ -39,6 +40,9 @@ export class CommitCashTipsTool extends McpTool {
         }
 
         const squareContext = await this.#squareContextResolver.resolve(principal.principalId);
+        if (preview.principalId !== principal.principalId || preview.merchantId !== squareContext.merchantId) {
+            throw new Error('preview_token belongs to a different account. Run reconcile_cash_tips again.');
+        }
 
         let approvedIds = null;
         if (args.approved_timecard_ids_json) {
@@ -55,6 +59,9 @@ export class CommitCashTipsTool extends McpTool {
         if (toCommit.length === 0) {
             throw new Error('No allocations to commit - nothing in approved_timecard_ids_json matched the preview.');
         }
+        if (toCommit.length > CommitCashTipsTool.MAX_TIP_COMMITS_PER_CALL) {
+            throw new Error(`A cash-tip commit can update at most ${CommitCashTipsTool.MAX_TIP_COMMITS_PER_CALL} timecards. Approve a smaller subset.`);
+        }
 
         const results = [];
         for (const allocation of toCommit) {
@@ -62,6 +69,12 @@ export class CommitCashTipsTool extends McpTool {
                 // Re-read immediately before writing: the preview's data may be stale by approval time,
                 // and Timecard.version is required for optimistic concurrency on the update.
                 const { timecard: current } = await squareContext.client.labor.retrieveTimecard({ id: allocation.timecardId });
+                if (current.locationId !== preview.locationId) {
+                    throw new Error('Timecard location does not match the approved preview.');
+                }
+                if (current.version !== preview.timecardVersions?.[allocation.timecardId]) {
+                    throw new Error('Timecard has changed since the preview. Run reconcile_cash_tips again before committing.');
+                }
                 const { id: _currentId, ...timecardFields } = current;
                 await squareContext.client.labor.updateTimecard({
                     id: allocation.timecardId,
